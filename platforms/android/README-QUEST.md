@@ -9,7 +9,7 @@ Install
 -------
 1. Enable developer mode on the headset and connect it by USB.
 2. adb install -r Warzone2100-VR-Quest-v<version>.apk
-3. Start "Warzone 2100" from the library (Unknown sources). The first start unpacks
+3. Start "Warzone 2100 VR" from the library (Unknown sources). The first start unpacks
    the game data (about a minute).
 
 The APK is the full game, including the campaign videos.
