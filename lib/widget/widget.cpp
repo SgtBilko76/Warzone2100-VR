@@ -1048,6 +1048,41 @@ UDWORD widgGetMouseOver(const std::shared_ptr<W_SCREEN> &psScreen)
 	return 0;
 }
 
+bool isMouseOverAnyWidget()
+{
+	auto lockedMouseOverWidget = psMouseOverWidget.lock();
+	if (!lockedMouseOverWidget)
+	{
+		return false;
+	}
+	return !psMouseOverWidgetScreen || lockedMouseOverWidget != psMouseOverWidgetScreen->psForm;
+}
+
+bool widgIsMouseTargetAt(int x, int y)
+{
+	W_CONTEXT context = W_CONTEXT::ZeroContext();
+	context.mx = x;
+	context.my = y;
+	bool found = false;
+	forEachOverlayScreen([&context, &found](const OverlayScreen& overlay) -> bool
+	{
+		W_CONTEXT overlayContext = context;
+		auto target = overlay.psScreen->psForm->findMouseTargetRecursive(&overlayContext, WKEY_NONE, true);
+		found = target && target != overlay.psScreen->psForm;
+		return !found;
+	});
+	if (!found)
+	{
+		if (auto screen = psLastRunScreen.lock())
+		{
+			W_CONTEXT screenContext = context;
+			auto target = screen->psForm->findMouseTargetRecursive(&screenContext, WKEY_NONE, true);
+			found = target && target != screen->psForm;
+		}
+	}
+	return found;
+}
+
 bool isMouseOverSomeWidget(const std::shared_ptr<W_SCREEN> &psScreen)
 {
 	if (auto lockedMouserOverWidget = psMouseOverWidget.lock())

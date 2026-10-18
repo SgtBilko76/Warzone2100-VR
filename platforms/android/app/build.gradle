@@ -1,0 +1,77 @@
+plugins {
+    id 'com.android.application'
+}
+
+// The native library (libmain.so) and the game data are produced by
+// build-native.sh, which runs the regular CMake build against the vcpkg
+// arm64-android dependencies. Gradle only packages the result.
+def jniLibsDir = file('src/main/jniLibs/arm64-v8a/libmain.so')
+
+android {
+    namespace 'net.wz2100.warzone2100'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'net.wz2100.warzone2100.quest'
+
+        // Quest 2/3/3S/Pro all run Android 12L or newer.
+        minSdk 32
+        targetSdk 34
+
+        versionCode 1
+        versionName '0.1.0-beta'
+
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    // The .wz archives are extracted on first launch; storing them
+    // uncompressed makes that a plain copy.
+    androidResources {
+        noCompress += ['wz', 'ogg', 'opus']
+    }
+
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging false
+        }
+    }
+
+    buildTypes {
+        debug {
+            debuggable true
+            jniDebuggable true
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main {
+            // SDL's Java glue, copied from the matching SDL3 source by build-native.sh
+            java.srcDirs += 'src/sdl/java'
+        }
+    }
+}
+
+dependencies {
+    implementation 'org.khronos.openxr:openxr_loader_for_android:1.1.62'
+}
+
+tasks.configureEach { task ->
+    if (task.name.startsWith('merge') && task.name.endsWith('JniLibFolders')) {
+        task.doFirst {
+            if (!jniLibsDir.exists()) {
+                throw new GradleException("libmain.so missing: run platforms/android/build-native.sh first")
+            }
+        }
+    }
+}

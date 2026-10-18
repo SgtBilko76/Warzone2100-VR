@@ -247,6 +247,8 @@ bool isMouseOverScreenOverlayChild(int mx, int my); // global mouse coordinates 
 bool isMouseClickDownOnScreenOverlayChild();
 bool isMouseOverWheelScrollConsumingWidget(); // reflects the most recent widgRunScreen call
 bool isMouseOverSomeWidget(const std::shared_ptr<W_SCREEN> &psScreen);
+bool isMouseOverAnyWidget(); // over a widget of any screen (base or overlay), other than a screen's root form
+bool widgIsMouseTargetAt(int x, int y); // a widget of the last run screen or an overlay (other than a root form) is at the point
 void widgScheduleTask(std::function<void ()> f);
 
 // The base screen most recently passed to widgRunScreen - i.e. the screen

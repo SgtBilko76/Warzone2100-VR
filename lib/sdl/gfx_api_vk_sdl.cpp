@@ -23,6 +23,9 @@
 #include "lib/framework/frame.h"
 #include <SDL3/SDL_vulkan.h>
 #include <SDL3/SDL_version.h>
+#if defined(WZ_OPENXR_ENABLED)
+# include "wz_openxr.h"
+#endif
 
 sdl_Vulkan_Impl::sdl_Vulkan_Impl(SDL_Window* _window, bool _allowImplicitLayers)
 {
@@ -84,12 +87,28 @@ bool sdl_Vulkan_Impl::createWindowSurface(VkInstance instance, VkSurfaceKHR* sur
 
 void sdl_Vulkan_Impl::getDrawableSize(int* w, int* h)
 {
+#if defined(WZ_OPENXR_ENABLED)
+	if (wzxr::isActive())
+	{
+		wzxr::getTargetSize(*w, *h);
+		return;
+	}
+#endif
 	SDL_GetWindowSizeInPixels(window, w, h);
 }
 
 bool sdl_Vulkan_Impl::allowImplicitLayers() const
 {
 	return m_allowImplicitLayers;
+}
+
+gfx_api::vk_external_presenter* sdl_Vulkan_Impl::getExternalPresenter()
+{
+#if defined(WZ_OPENXR_ENABLED)
+	return wzxr::presenter();
+#else
+	return nullptr;
+#endif
 }
 
 #endif // defined(WZ_VULKAN_ENABLED) && defined(HAVE_SDL_VULKAN_H)

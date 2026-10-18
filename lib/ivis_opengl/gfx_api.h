@@ -405,6 +405,23 @@ namespace gfx_api
 
 	const char* to_string(data_buffer_transport transport);
 
+	/// One eye of a stereo (VR) frame, in the presenter's tracking space (meters, Y up, -Z forward)
+	struct StereoEyeView
+	{
+		glm::mat4 viewFromTracking{1.f}; ///< inverse of the eye pose
+		float tanLeft = -1.f, tanRight = 1.f, tanUp = 1.f, tanDown = -1.f; ///< field of view as tangents (left/down negative)
+		uint32_t width = 0, height = 0; ///< eye target size in pixels
+	};
+
+	/// Restricts which passes record draw commands while a compiled graph executes; filtered-out
+	/// passes still begin and end (keeping layout transitions intact) but record nothing.
+	/// Pass nullptr to record every pass.
+	using RecordFilter = bool (*)(PassId passId);
+
+	/// Stereo targets: 0 / 1 are the eyes, kStereoHudTarget is the upright HUD panel (same size as the regular target)
+	constexpr size_t kStereoHudTarget = 2;
+	void setRenderGraphRecordFilter(RecordFilter filter);
+
 	struct context
 	{
 		enum class buffer_storage_hint
@@ -673,6 +690,21 @@ namespace gfx_api
 		}
 		/// Last committed catalog request (allocated surfaces, not raw gameplay config).
 		SceneEffectSurfaces storedSceneEffectSurfaces() const { return _sceneEffectSurfaces; }
+
+		// Stereo (VR) presentation. When available, piemode may render the in-game 3D scene once per
+		// eye into the presenter's eye targets, then the 2D overlay into the regular target.
+		virtual bool stereoRenderingAvailable() const { return false; }
+		/// Redirects the swapchain color target to one eye (and fills its view) or the HUD panel
+		/// (kStereoHudTarget), or back to the regular target (nullopt)
+		virtual bool setStereoEyeTarget(optional<size_t> eye, StereoEyeView* outView = nullptr) { return false; }
+		/// Clear 2D overlay targets to transparent (they are composited over the stereo scene)
+		virtual void setOverlayTargetTransparent(bool transparent) {}
+		/// Whether this frame presents the eye targets (with the regular target as overlay) or the regular target alone
+		virtual void setStereoFramePresented(bool presented) {}
+		/// Where the overlay (regular target) is shown in stereo frames: a quad in tracking space (+Y of the quad is the image's up)
+		virtual void setStereoOverlayPlacement(const glm::mat4& trackingFromQuad, float widthMeters, float heightMeters) {}
+		/// Where the HUD panel (kStereoHudTarget) is shown in stereo frames, relative to the head (head-locked)
+		virtual void setStereoHudPlacement(const glm::mat4& trackingFromQuad, float widthMeters, float heightMeters) {}
 
 		/// Record draw commands for a compiled pass graph (beginPass / recordFunc / endPass).
 		/// Does not submit, present, or advance the frame ring; piemode calls finishScreenFrame()

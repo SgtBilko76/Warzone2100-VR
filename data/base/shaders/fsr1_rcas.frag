@@ -47,6 +47,13 @@ varying vec2 texCoords;
 
 // This uses a 5 tap filter in a '+' pattern (plus shape),
 // where the limit is set to the minimal local contrast.
+// Mixed reality (VR): where nothing was drawn (black background) the image is transparent, so the
+// headset's passthrough shows the real room around the battlefield. Ignored by opaque presentation.
+vec4 wzMixedRealityKey(vec3 c)
+{
+	return vec4(c, clamp(max(c.r, max(c.g, c.b)) * 48.0, 0.0, 1.0));
+}
+
 void main()
 {
 	// Algorithm uses minimal 3x3 pixel neighborhood.
@@ -75,5 +82,5 @@ void main()
 	float rcpL = 1.0 / (4.0 * lobe + 1.0);
 	vec3 pix = ((b + d + f + h) * lobe + e) * rcpL;
 
-	FragColor = vec4(pix, 1.0);
+	FragColor = wzMixedRealityKey(pix);
 }

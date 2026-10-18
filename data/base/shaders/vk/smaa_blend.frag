@@ -74,6 +74,13 @@ void movc4(bvec4 cond, inout vec4 variable, vec4 value)
 	if (cond.w) { variable.w = value.w; }
 }
 
+// Mixed reality (VR): where nothing was drawn (black background) the image is transparent, so the
+// headset's passthrough shows the real room around the battlefield. Ignored by opaque presentation.
+vec4 wzMixedRealityKey(vec3 c)
+{
+	return vec4(c, clamp(max(c.r, max(c.g, c.b)) * 48.0, 0.0, 1.0));
+}
+
 void main()
 {
 	// blending weights covering this pixel, from itself and its right and top neighbors
@@ -84,7 +91,7 @@ void main()
 
 	if (dot(a, vec4(1.0)) < 1e-5)
 	{
-		FragColor = vec4(sampleColor(uv), 1.0);
+		FragColor = wzMixedRealityKey(sampleColor(uv));
 		return;
 	}
 
@@ -111,7 +118,7 @@ void main()
 	vec3 color = blendingWeight.x * mix(c0, c1, f.x);
 	color += blendingWeight.y * mix(c0, c2, f.y);
 
-	FragColor = vec4(sqrt(color), 1.0);
+	FragColor = wzMixedRealityKey(sqrt(color));
 #else
 	vec4 blendingOffset = vec4(0.0, a.y, 0.0, a.w);
 	movc4(bvec4(h), blendingOffset, vec4(a.x, 0.0, a.z, 0.0));
@@ -121,6 +128,6 @@ void main()
 	vec3 color = blendingWeight.x * sampleColor(blendingCoord.xy);
 	color += blendingWeight.y * sampleColor(blendingCoord.zw);
 
-	FragColor = vec4(color, 1.0);
+	FragColor = wzMixedRealityKey(color);
 #endif
 }

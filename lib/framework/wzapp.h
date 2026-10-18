@@ -162,6 +162,10 @@ struct WzTextInputRect
 void StartTextInput(void* pTextInputRequester, const WzTextInputRect& textInputRect);
 void StopTextInput(void* pTextInputResigner);
 bool isInTextInputMode();
+/// The current text input owner (e.g. the edit box being edited) and its on-screen rect. False while no text input is active.
+bool wzGetTextInputField(void*& owner, WzTextInputRect& rect);
+// VR: mixed reality (the real room via passthrough) is on
+bool wzVrMixedRealityActive();
 bool wzSeemsLikeNonTouchPlatform();
 
 // NOTE: wzBackendAttemptOpenURL should *not* be called directly - instead, call openURLInBrowser() from urlhelpers.h

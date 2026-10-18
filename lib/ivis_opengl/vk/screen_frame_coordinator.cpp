@@ -96,8 +96,7 @@ void ScreenFrameCoordinator::reconcileSwapchainAtFrameOpen()
 	int drawableHeight = 0;
 	_root.backend_impl->getDrawableSize(&drawableWidth, &drawableHeight);
 
-	const bool drawableMismatch = _presentation.drawableRequiresSwapchainRecreate(drawableWidth, drawableHeight,
-		_root.swapchainSize, _root.swapchain);
+	const bool drawableMismatch = _root.drawableRequiresTargetRecreate(drawableWidth, drawableHeight);
 	const bool forceRecreate = _presentation.swapchainRecreatePending();
 
 	if (!drawableMismatch && !forceRecreate)
@@ -184,6 +183,10 @@ void ScreenFrameCoordinator::acquireSwapchainForFrameDraw()
 			deferWithPlaceholderExtents(true);
 			return;
 
+		case VkRoot::SwapchainAcquireStatus::Skipped:
+			// No target image this frame; nothing to recreate
+			return;
+
 		case VkRoot::SwapchainAcquireStatus::Suboptimal:
 			requestSwapchainRecreate();
 			switch (WsiPlatformPolicy::suboptimalAcquireAction())
@@ -254,8 +257,7 @@ ScreenFramePipelineState ScreenFrameCoordinator::buildCommitInputs()
 	}
 
 	_root.backend_impl->getDrawableSize(&state.drawableWidth, &state.drawableHeight);
-	if (_presentation.drawableRequiresSwapchainRecreate(state.drawableWidth, state.drawableHeight,
-		_root.swapchainSize, _root.swapchain))
+	if (_root.drawableRequiresTargetRecreate(state.drawableWidth, state.drawableHeight))
 	{
 		state.mustSkipDrawing = true;
 		debug(LOG_3D, "[1] Drawable size (%d x %d) does not match swapchainSize (%d x %d) - defer recreate to next Begin",
@@ -422,6 +424,14 @@ void ScreenFrameCoordinator::advanceRingIfSubmittedDraw(ScreenFramePipelineState
 
 void ScreenFrameCoordinator::presentAndAdvanceRing(ScreenFramePipelineState& state)
 {
+	if (_root.externalPresenter)
+	{
+		// Hands the image back (e.g. xrReleaseSwapchainImage + xrEndFrame) after the queue submit
+		_root.externalPresenter->presentTargetImage();
+		advanceRingIfSubmittedDraw(state);
+		return;
+	}
+
 	auto presentInfo = ::vk::PresentInfoKHR()
 		.setPSwapchains(&_root.swapchain)
 		.setSwapchainCount(1)

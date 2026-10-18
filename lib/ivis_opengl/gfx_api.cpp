@@ -851,6 +851,13 @@ void gfx_api::context::warmCompiledRenderGraph(std::vector<RenderPassDesc>& /*pa
 {
 }
 
+static gfx_api::RecordFilter s_recordFilter = nullptr;
+
+void gfx_api::setRenderGraphRecordFilter(RecordFilter filter)
+{
+	s_recordFilter = filter;
+}
+
 void gfx_api::context::executeCompiledRenderGraph(std::vector<RenderPassDesc>& passes,
 	const PassGraphCompileResult& compileResult)
 {
@@ -896,7 +903,7 @@ void gfx_api::context::executeCompiledRenderGraph(std::vector<RenderPassDesc>& p
 			{
 				debugStringMarker(batchPass.desc.debugName.c_str());
 			}
-			if (batchPass.desc.recordFunc)
+			if (batchPass.desc.recordFunc && (s_recordFilter == nullptr || s_recordFilter(batchPass.desc.passId)))
 			{
 				const RenderPassContext batchContext = buildRenderPassContext(batchPass);
 				batchPass.desc.recordFunc(batchContext);

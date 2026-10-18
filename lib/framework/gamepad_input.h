@@ -80,6 +80,10 @@ bool gamepadIsConnected();
 // Whether the gamepad is the most recent input source (vs the mouse/keyboard)
 bool isGamepadActiveInput();
 
+// Pointer mode (VR): a tracked laser places the cursor and clicks, the sticks steer the camera only -
+// the left stick no longer moves the cursor, and the cursor magnets / hops are off
+bool gamepadPointerMode();
+
 // Whether the right stick is currently scrolling the widget under the cursor
 bool gamepadRightStickConsumedByUI();
 

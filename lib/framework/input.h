@@ -182,6 +182,20 @@ typedef std::vector<MousePress> MousePresses;
 /** Tell the input system that we have lost the focus. */
 void inputLoseFocus();
 void StopTextInput();
+
+/** Virtual (on-screen) keyboard support: queue an editing key (KEY_BACKSPACE, KEY_RETURN, arrows...)
+ * or a typed character for the active text input, as a physical keyboard would. */
+void inputAddVirtualKey(KEY_CODE code);
+void inputAddVirtualText(utf_32_char unicode);
+/** Sees every mouse button press / release before the game does. Returning true for a press swallows it
+ * (and its matching release), so e.g. clicks on an on-screen keyboard don't reach the widgets below. */
+typedef bool (*MouseButtonFilterFunc)(MOUSE_KEY_CODE key, bool pressed, Vector2i logicalPos);
+void inputSetMouseButtonFilter(MouseButtonFilterFunc filter);
+/** Whether the interface has something to point at, at a (logical screen) point - lets a VR laser tell
+ * the HUD's widgets from the battlefield showing through it. True when no test is registered. */
+typedef bool (*PointerTargetTestFunc)(int x, int y);
+void inputSetPointerTargetTest(PointerTargetTestFunc test);
+bool inputPointerTargetAt(int x, int y);
 /** Converts the key code into an ascii string. */
 WZ_DECL_NONNULL(2) void keyScanToString(KEY_CODE code, char *ascii, UDWORD maxStringSize);
 WZ_DECL_NONNULL(2) void mouseKeyCodeToString(const MOUSE_KEY_CODE code, char *ascii, const int maxStringLength);

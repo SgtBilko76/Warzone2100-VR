@@ -27,6 +27,8 @@
 // active input source. Call once the widget system is initialized
 bool gamepadCursorInit();
 void gamepadCursorShutdown();
+// Draws the gamepad cursor now, at the mouse position (normally done by its overlay widget)
+void gamepadCursorDraw();
 
 // Feeds the cursor's attraction target from clickable widgets near the
 // cursor, called each frame from the main loop

@@ -857,3 +857,33 @@ void debug_callback_emscripten_log(WZ_DECL_UNUSED void **data, const char *outpu
 }
 
 #endif
+
+#if defined(__ANDROID__)
+#include <android/log.h>
+
+/**
+ * Callback for outputting to the Android log (logcat, tag "WZ2100")
+ *
+ * \param	data			Ignored. Use NULL.
+ * \param	outputBuffer	Buffer containing the preprocessed text to output.
+ */
+void debug_callback_android_log(WZ_DECL_UNUSED void **data, const char *outputBuffer, code_part part)
+{
+	int priority = ANDROID_LOG_INFO;
+	switch (part)
+	{
+		case LOG_FATAL:
+			priority = ANDROID_LOG_FATAL;
+			break;
+		case LOG_ERROR:
+			priority = ANDROID_LOG_ERROR;
+			break;
+		case LOG_WARNING:
+			priority = ANDROID_LOG_WARN;
+			break;
+		default:
+			break;
+	}
+	__android_log_write(priority, "WZ2100", outputBuffer);
+}
+#endif

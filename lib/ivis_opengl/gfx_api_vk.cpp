@@ -3633,7 +3633,21 @@ bool VkRoot::createVulkanInstance(uint32_t apiVersion, const std::vector<const c
 	}
 #endif
 
-	VkResult result = _vkCreateInstance(reinterpret_cast<const VkInstanceCreateInfo*>(&instanceCreateInfo), nullptr, reinterpret_cast<VkInstance*>(&inst));
+	VkResult result = VK_SUCCESS;
+	if (externalPresenter)
+	{
+		VkInstance externalInstance = VK_NULL_HANDLE;
+		if (!externalPresenter->createInstance(_vkGetInstanceProcAddr, *reinterpret_cast<const VkInstanceCreateInfo*>(&instanceCreateInfo), externalInstance))
+		{
+			debug(LOG_ERROR, "externalPresenter->createInstance failed");
+			return false;
+		}
+		inst = vk::Instance(externalInstance);
+	}
+	else
+	{
+		result = _vkCreateInstance(reinterpret_cast<const VkInstanceCreateInfo*>(&instanceCreateInfo), nullptr, reinterpret_cast<VkInstance*>(&inst));
+	}
 	if (result != VK_SUCCESS)
 	{
 		// vkCreateInstance failed
@@ -3903,6 +3917,17 @@ int rateDeviceSuitability(const vk::PhysicalDevice &device, const vk::SurfaceKHR
 vk::PhysicalDevice VkRoot::pickPhysicalDevice()
 {
 	ASSERT(inst, "Instance is null");
+
+	if (externalPresenter)
+	{
+		VkPhysicalDevice externalPhysicalDevice = VK_NULL_HANDLE;
+		if (!externalPresenter->getPhysicalDevice(static_cast<VkInstance>(inst), externalPhysicalDevice) || externalPhysicalDevice == VK_NULL_HANDLE)
+		{
+			throw std::runtime_error("External presenter did not provide a physical device");
+		}
+		return vk::PhysicalDevice(externalPhysicalDevice);
+	}
+
 	ASSERT(surface, "Surface is null");
 
 	const auto physicalDevices = inst.enumeratePhysicalDevices(vkDynLoader);
@@ -3947,10 +3972,117 @@ std::pair<uint32_t, uint32_t> VkRoot::getDrawableDimensions()
 	return {swapchainSize.width, swapchainSize.height};
 }
 
+vk::Extent2D VkRoot::swapchainTargetExtent() const
+{
+	if (_eyeTargetOverride.has_value())
+	{
+		return _eyeTargetOverride->extent;
+	}
+	return swapchainSize;
+}
+
+void VkRoot::destroyEyeImageViews()
+{
+	_eyeTargetOverride.reset();
+	for (auto& it : _eyeImageViews)
+	{
+		dev.destroyImageView(it.second, nullptr, vkDynLoader);
+	}
+	_eyeImageViews.clear();
+}
+
+bool VkRoot::stereoRenderingAvailable() const
+{
+	return externalPresenter != nullptr && externalPresenter->supportsStereo();
+}
+
+bool VkRoot::setStereoEyeTarget(optional<size_t> eye, gfx_api::StereoEyeView* outView)
+{
+	if (!eye.has_value())
+	{
+		_eyeTargetOverride.reset();
+		return true;
+	}
+	ASSERT_OR_RETURN(false, !hasActivePass, "setStereoEyeTarget inside an active pass");
+	ASSERT_OR_RETURN(false, stereoRenderingAvailable(), "Stereo rendering unavailable");
+
+	VkImage image = VK_NULL_HANDLE;
+	VkExtent2D extent = {0, 0};
+	gfx_api::StereoEyeView view;
+	const bool acquired = (eye.value() == gfx_api::kStereoHudTarget)
+		? externalPresenter->getHudTarget(image, extent)
+		: externalPresenter->getEyeTarget(eye.value(), image, extent, view);
+	if (!acquired || image == VK_NULL_HANDLE)
+	{
+		_eyeTargetOverride.reset();
+		return false;
+	}
+
+	auto it = _eyeImageViews.find(image);
+	if (it == _eyeImageViews.end())
+	{
+		vk::ImageView imageView = dev.createImageView(
+			vk::ImageViewCreateInfo()
+			.setImage(vk::Image(image))
+			.setFormat(surfaceFormat.format)
+			.setViewType(vk::ImageViewType::e2D)
+			.setComponents(vk::ComponentMapping())
+			.setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1))
+			, nullptr, vkDynLoader);
+		it = _eyeImageViews.emplace(image, imageView).first;
+	}
+
+	_eyeTargetOverride = EyeTargetOverride{ vk::Image(image), it->second, vk::Extent2D(extent.width, extent.height) };
+	if (outView)
+	{
+		*outView = view;
+	}
+	return true;
+}
+
+void VkRoot::setOverlayTargetTransparent(bool transparent)
+{
+	_overlayTargetTransparent = transparent;
+}
+
+void VkRoot::setStereoFramePresented(bool presented)
+{
+	if (externalPresenter)
+	{
+		externalPresenter->setStereoFramePresented(presented);
+	}
+}
+
+void VkRoot::setStereoOverlayPlacement(const glm::mat4& trackingFromQuad, float widthMeters, float heightMeters)
+{
+	if (externalPresenter)
+	{
+		externalPresenter->setStereoOverlayPlacement(trackingFromQuad, widthMeters, heightMeters);
+	}
+}
+
+void VkRoot::setStereoHudPlacement(const glm::mat4& trackingFromQuad, float widthMeters, float heightMeters)
+{
+	if (externalPresenter)
+	{
+		externalPresenter->setStereoHudPlacement(trackingFromQuad, widthMeters, heightMeters);
+	}
+}
+
+bool VkRoot::drawableRequiresTargetRecreate(int drawableWidth, int drawableHeight) const
+{
+	if (externalPresenter)
+	{
+		// External targets have a fixed size chosen by the presenter; only recreate if they are gone
+		return swapchainImages.empty();
+	}
+	return _screenFrameCoordinator.presentation().drawableRequiresSwapchainRecreate(drawableWidth, drawableHeight, swapchainSize, swapchain);
+}
+
 bool VkRoot::shouldDraw()
 {
 	// check for > 1 here because we use 1,1 in place of a 0,0 swapchain size to avoid other issues
-	return static_cast<bool>(swapchain)
+	return hasPresentTarget()
 		&& swapchainSize.width > 1
 		&& swapchainSize.height > 1;
 }
@@ -3997,6 +4129,12 @@ void VkRoot::shutdown()
 	{
 		vmaDestroyAllocator(allocator);
 		allocator = VK_NULL_HANDLE;
+	}
+
+	if (externalPresenter)
+	{
+		// e.g. the XR session must go before the device it was created with
+		externalPresenter->shutdown();
 	}
 
 	// destroy logical device
@@ -4180,6 +4318,12 @@ void VkRoot::destroySwapchainAndSwapchainSpecificStuff(bool doDestroySwapchain)
 	}
 	swapchainImageView.clear();
 	swapchainImages.clear();
+	destroyEyeImageViews();
+
+	if (doDestroySwapchain && externalPresenter)
+	{
+		externalPresenter->destroyTargetImages();
+	}
 
 	if(doDestroySwapchain && swapchain)
 	{
@@ -4451,6 +4595,14 @@ gfx_api::context::swap_interval_mode from_vk_presentmode(vk::PresentModeKHR pres
 bool VkRoot::setSwapInterval(gfx_api::context::swap_interval_mode newSwapMode, const SetSwapIntervalCompletionHandler& completionHandler)
 {
 	ASSERT(physicalDevice, "Physical device is null");
+
+	if (externalPresenter)
+	{
+		// Frame pacing is owned by the external presenter (e.g. xrWaitFrame)
+		if (completionHandler) { completionHandler(); }
+		return true;
+	}
+
 	ASSERT(surface, "Surface is null");
 
 	SwapChainSupportDetails swapChainSupport = querySwapChainSupport(physicalDevice, surface, vkDynLoader);
@@ -4482,11 +4634,55 @@ gfx_api::context::swap_interval_mode VkRoot::getSwapInterval() const
 static uint32_t getVKSuggestedDefaultDepthBufferResolution(const vk::PhysicalDeviceProperties &physicalDeviceProperties, const vk::PhysicalDeviceMemoryProperties& memprops);
 
 // throws a vk::SystemError on an unrecoverable error (like OOM)
+void VkRoot::createExternalPresenterTargets(int& w, int& h)
+{
+	ASSERT(externalPresenter, "No external presenter");
+
+	// The game renders gamma-encoded values into UNORM targets (see chooseSwapSurfaceFormat).
+	// The presenter may back these with sRGB images (viewed as UNORM) so the compositor decodes them correctly.
+	const std::vector<VkFormat> preferredFormats = {
+		VK_FORMAT_R8G8B8A8_UNORM,
+		VK_FORMAT_B8G8R8A8_UNORM
+	};
+	VkFormat targetFormat = VK_FORMAT_UNDEFINED;
+	VkExtent2D targetExtent = {0, 0};
+	std::vector<VkImage> targetImages;
+	if (!externalPresenter->createTargetImages(preferredFormats, targetFormat, targetExtent, targetImages) || targetImages.empty())
+	{
+		WZ_THROW_VK_RESULT_EXCEPTION(vk::Result::eErrorInitializationFailed, "externalPresenter->createTargetImages failed");
+	}
+
+	surfaceFormat = vk::SurfaceFormatKHR{ static_cast<vk::Format>(targetFormat), vk::ColorSpaceKHR::eSrgbNonlinear };
+	swapchainSize = vk::Extent2D{ targetExtent.width, targetExtent.height };
+	w = static_cast<int>(targetExtent.width);
+	h = static_cast<int>(targetExtent.height);
+	presentMode = vk::PresentModeKHR::eFifo;
+	_swapchainSupportsScreenshotReadback = false;
+	debug(LOG_3D, "Using external presenter targets: %zu x (%" PRIu32 " x %" PRIu32 "), format: %s", targetImages.size(), swapchainSize.width, swapchainSize.height, to_string(surfaceFormat.format).c_str());
+
+	swapchainImages.clear();
+	for (VkImage img : targetImages)
+	{
+		swapchainImages.push_back(vk::Image(img));
+	}
+	for (const auto& img : swapchainImages)
+	{
+		swapchainImageView.push_back(dev.createImageView(
+			vk::ImageViewCreateInfo()
+			.setImage(img)
+			.setFormat(surfaceFormat.format)
+			.setViewType(vk::ImageViewType::e2D)
+			.setComponents(vk::ComponentMapping())
+			.setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1))
+			, nullptr, vkDynLoader));
+	}
+}
+
 void VkRoot::createSwapchain(bool allowHandleSurfaceLost)
 {
 	ASSERT(backend_impl, "Backend implementation is null");
 	ASSERT(physicalDevice, "Physical device is null");
-	ASSERT(surface, "Surface is null");
+	ASSERT(surface || externalPresenter, "Surface is null");
 	ASSERT(dev, "Logical device is null");
 	ASSERT(allocator != VK_NULL_HANDLE, "Allocator is null");
 	ASSERT(graphicsQueue, "Graphics queue not initialized");
@@ -4496,175 +4692,182 @@ void VkRoot::createSwapchain(bool allowHandleSurfaceLost)
 	debug(LOG_3D, "createSwapchain()");
 
 	currentSwapchainIndex = 0;
-	SwapChainSupportDetails swapChainSupport;
-	try {
-		swapChainSupport = querySwapChainSupport(physicalDevice, surface, vkDynLoader);
-	}
-	catch (const vk::SurfaceLostKHRError &e)
+	int w = 0, h = 0;
+	if (externalPresenter)
 	{
-		if (allowHandleSurfaceLost)
-		{
-			debug(LOG_INFO, "Querying swapchain support failed with ErrorSurfaceLostKHR - must recreate surface + swapchain: %s", e.what());
-			// recreate surface + swapchain
-			handleSurfaceLost(); // will throw if unsuccessful
-		}
-		else
-		{
-			debug(LOG_ERROR, "Querying swapchain support failed with error: %s", e.what());
-			throw;
-		}
-	}
-	catch (const vk::SystemError &e)
-	{
-		auto resultErr = static_cast<vk::Result>(e.code().value());
-		debug(LOG_ERROR, "Querying swapchain support failed with error: %s: %s", vk::to_string(resultErr).c_str(), e.what());
-		throw;
-	}
-
-	_screenFrameCoordinator.presentation().updateCachedExtentLimits(swapChainSupport.capabilities);
-
-	if (!findBestAvailablePresentModeForSwapMode(swapChainSupport.presentModes, swapMode, presentMode))
-	{
-		debug(LOG_WARNING, "Unable to find best available presentation mode for swapmode: %s", to_string(swapMode).c_str());
-
-		// VK_PRESENT_MODE_FIFO_KHR is *required* to be supported, so fall back to it
-		if(std::find(swapChainSupport.presentModes.begin(), swapChainSupport.presentModes.end(), vk::PresentModeKHR::eFifo) == swapChainSupport.presentModes.end())
-		{
-			// vk::PresentModeKHR::eFifo is unsupported??
-			debug(LOG_FATAL, "vk::PresentModeKHR::eFifo does not appear to be supported?? Aborting.");
-			WZ_THROW_VK_RESULT_EXCEPTION(vk::Result::eErrorUnknown, "vk::PresentModeKHR::eFifo does not appear to be supported??");
-		}
-		presentMode = vk::PresentModeKHR::eFifo;
-		swapMode = from_vk_presentmode(presentMode);
-	}
-	debug(LOG_3D, "Using present mode: %s", to_string(presentMode).c_str());
-
-	int w, h;
-	backend_impl->getDrawableSize(&w, &h);
-	ASSERT(w > 0 && h > 0, "getDrawableSize returned: %d x %d", w, h);
-	const uint32_t drawableW = static_cast<uint32_t>(w);
-	const uint32_t drawableH = static_cast<uint32_t>(h);
-	// clamp drawableSize to VkSurfaceCapabilitiesKHR minImageExtent / maxImageExtent
-	// see: https://bugzilla.libsdl.org/show_bug.cgi?id=4671
-	swapchainSize = _screenFrameCoordinator.presentation().clampDrawableToSwapchainExtent(drawableW, drawableH);
-	if (swapchainSize.width == 0 || swapchainSize.height == 0)
-	{
-		debug(LOG_3D, "swapchain dimensions: %" PRIu32" x %" PRIu32"", swapchainSize.width, swapchainSize.height);
-	}
-	if (drawableW != swapchainSize.width || drawableH != swapchainSize.height)
-	{
-		debug(LOG_3D, "Clamped drawableSize (%" PRIu32" x %" PRIu32") to minImageExtent (%" PRIu32" x %" PRIu32") & maxImageExtent (%" PRIu32" x %" PRIu32"): swapchainSize (%" PRIu32" x %" PRIu32")",
-			drawableW, drawableH,
-			swapChainSupport.capabilities.minImageExtent.width, swapChainSupport.capabilities.minImageExtent.height,
-			swapChainSupport.capabilities.maxImageExtent.width, swapChainSupport.capabilities.maxImageExtent.height,
-			swapchainSize.width, swapchainSize.height);
-	}
-
-	// pick swapchain image count (triple-buffering, if possible)
-	uint32_t swapchainDesiredImageCount = std::max<uint32_t>(3, swapChainSupport.capabilities.minImageCount);
-	if (swapChainSupport.capabilities.maxImageCount > 0) // maxImageCount may be 0, in which case there is no defined upper limit
-	{
-		swapchainDesiredImageCount = std::min<uint32_t>(swapchainDesiredImageCount, swapChainSupport.capabilities.maxImageCount);
-	}
-	ASSERT(swapchainDesiredImageCount >= 2, "swapchainDesiredImageCount: %" PRIu32, swapchainDesiredImageCount);
-	if (swapchainDesiredImageCount != 3)
-	{
-		debug(LOG_3D, "Clamped swapchainDesiredImageCount: %" PRIu32" (minImageCount: %" PRIu32", maxImageCount: %" PRIu32")",
-			  swapchainDesiredImageCount, swapChainSupport.capabilities.minImageCount, swapChainSupport.capabilities.maxImageCount);
-	}
-
-	// pick surface format
-	surfaceFormat = chooseSwapSurfaceFormat(swapChainSupport.formats);
-	debug(LOG_3D, "Using surface format: %s - %s", to_string(surfaceFormat.format).c_str(), to_string(surfaceFormat.colorSpace).c_str());
-
-	// pick compositeAlpha
-	vk::CompositeAlphaFlagBitsKHR compositeAlphaMode = vk::CompositeAlphaFlagBitsKHR::eOpaque;
-	if (swapChainSupport.capabilities.supportedCompositeAlpha & vk::CompositeAlphaFlagBitsKHR::eOpaque)
-	{
-		compositeAlphaMode = vk::CompositeAlphaFlagBitsKHR::eOpaque;
-	}
-	else if (swapChainSupport.capabilities.supportedCompositeAlpha & vk::CompositeAlphaFlagBitsKHR::eInherit)
-	{
-		compositeAlphaMode = vk::CompositeAlphaFlagBitsKHR::eInherit;
+		createExternalPresenterTargets(w, h);
 	}
 	else
 	{
-		debug(LOG_INFO, "Unable to find expected supportedCompositeAlpha option (value is: %s) - will attempt opaque", to_string(swapChainSupport.capabilities.supportedCompositeAlpha).c_str());
-	}
-	debug(LOG_3D, "Using supportedCompositeAlpha: %s", to_string(compositeAlphaMode).c_str());
+		SwapChainSupportDetails swapChainSupport;
+		try {
+			swapChainSupport = querySwapChainSupport(physicalDevice, surface, vkDynLoader);
+		}
+		catch (const vk::SurfaceLostKHRError &e)
+		{
+			if (allowHandleSurfaceLost)
+			{
+				debug(LOG_INFO, "Querying swapchain support failed with ErrorSurfaceLostKHR - must recreate surface + swapchain: %s", e.what());
+				// recreate surface + swapchain
+				handleSurfaceLost(); // will throw if unsuccessful
+			}
+			else
+			{
+				debug(LOG_ERROR, "Querying swapchain support failed with error: %s", e.what());
+				throw;
+			}
+		}
+		catch (const vk::SystemError &e)
+		{
+			auto resultErr = static_cast<vk::Result>(e.code().value());
+			debug(LOG_ERROR, "Querying swapchain support failed with error: %s: %s", vk::to_string(resultErr).c_str(), e.what());
+			throw;
+		}
 
-	const vk::ImageUsageFlags desiredScreenshotUsage =
-		vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferSrc;
-	_swapchainSupportsScreenshotReadback =
-		(swapChainSupport.capabilities.supportedUsageFlags & desiredScreenshotUsage) == desiredScreenshotUsage;
-	if (!_swapchainSupportsScreenshotReadback)
-	{
-		debug(LOG_WARNING, "Swapchain does not support TRANSFER_SRC; Vulkan screenshots disabled");
-	}
+		_screenFrameCoordinator.presentation().updateCachedExtentLimits(swapChainSupport.capabilities);
 
-	vk::SwapchainCreateInfoKHR createSwapchainInfo = vk::SwapchainCreateInfoKHR()
-		.setSurface(surface)
-		.setMinImageCount(swapchainDesiredImageCount)
-		.setPresentMode(presentMode)
-		.setImageUsage(_swapchainSupportsScreenshotReadback
-			? desiredScreenshotUsage
-			: vk::ImageUsageFlagBits::eColorAttachment)
-		.setImageArrayLayers(1)
-		.setCompositeAlpha(compositeAlphaMode)
-		.setClipped(true)
-		.setImageExtent(swapchainSize)
-		.setImageFormat(surfaceFormat.format)
-		.setImageColorSpace(surfaceFormat.colorSpace)
-		.setImageSharingMode(vk::SharingMode::eExclusive)
-		.setOldSwapchain(swapchain);
+		if (!findBestAvailablePresentModeForSwapMode(swapChainSupport.presentModes, swapMode, presentMode))
+		{
+			debug(LOG_WARNING, "Unable to find best available presentation mode for swapmode: %s", to_string(swapMode).c_str());
 
-	// Handle separate graphicsFamily and presentFamily indices (i.e. separate graphics and presentation queues)
-	uint32_t queueFamilyIndicesU32[] = {queueFamilyIndices.graphicsFamily.value(), queueFamilyIndices.presentFamily.value()};
-	if (queueFamilyIndices.graphicsFamily != queueFamilyIndices.presentFamily)
-	{
-		debug(LOG_3D, "Using separate graphics (%" PRIu32") and presentation (%" PRIu32") queue families", queueFamilyIndices.graphicsFamily.value(), queueFamilyIndices.presentFamily.value());
-		createSwapchainInfo.setImageSharingMode(vk::SharingMode::eConcurrent);
-		createSwapchainInfo.setQueueFamilyIndexCount(2);
-		createSwapchainInfo.setPQueueFamilyIndices(queueFamilyIndicesU32);
-	}
+			// VK_PRESENT_MODE_FIFO_KHR is *required* to be supported, so fall back to it
+			if(std::find(swapChainSupport.presentModes.begin(), swapChainSupport.presentModes.end(), vk::PresentModeKHR::eFifo) == swapChainSupport.presentModes.end())
+			{
+				// vk::PresentModeKHR::eFifo is unsupported??
+				debug(LOG_FATAL, "vk::PresentModeKHR::eFifo does not appear to be supported?? Aborting.");
+				WZ_THROW_VK_RESULT_EXCEPTION(vk::Result::eErrorUnknown, "vk::PresentModeKHR::eFifo does not appear to be supported??");
+			}
+			presentMode = vk::PresentModeKHR::eFifo;
+			swapMode = from_vk_presentmode(presentMode);
+		}
+		debug(LOG_3D, "Using present mode: %s", to_string(presentMode).c_str());
 
-	try {
-		swapchain = dev.createSwapchainKHR(createSwapchainInfo, nullptr, vkDynLoader);
-	}
-	// Potential future TODO: Handle surface lost?
-	catch (const vk::SystemError &e) {
-		// Expected possibilities: vk::OutOfHostMemoryError, vk::OutOfDeviceMemoryError, vk::InitializationFailedError, surface lost, device lost, etc
-		auto resultErr = static_cast<vk::Result>(e.code().value());
-		debug(LOG_ERROR, "vk::Device::createSwapchainKHR: failed with error: %s: %s", vk::to_string(resultErr).c_str(), e.what());
-		throw;
-	}
+		backend_impl->getDrawableSize(&w, &h);
+		ASSERT(w > 0 && h > 0, "getDrawableSize returned: %d x %d", w, h);
+		const uint32_t drawableW = static_cast<uint32_t>(w);
+		const uint32_t drawableH = static_cast<uint32_t>(h);
+		// clamp drawableSize to VkSurfaceCapabilitiesKHR minImageExtent / maxImageExtent
+		// see: https://bugzilla.libsdl.org/show_bug.cgi?id=4671
+		swapchainSize = _screenFrameCoordinator.presentation().clampDrawableToSwapchainExtent(drawableW, drawableH);
+		if (swapchainSize.width == 0 || swapchainSize.height == 0)
+		{
+			debug(LOG_3D, "swapchain dimensions: %" PRIu32" x %" PRIu32"", swapchainSize.width, swapchainSize.height);
+		}
+		if (drawableW != swapchainSize.width || drawableH != swapchainSize.height)
+		{
+			debug(LOG_3D, "Clamped drawableSize (%" PRIu32" x %" PRIu32") to minImageExtent (%" PRIu32" x %" PRIu32") & maxImageExtent (%" PRIu32" x %" PRIu32"): swapchainSize (%" PRIu32" x %" PRIu32")",
+				drawableW, drawableH,
+				swapChainSupport.capabilities.minImageExtent.width, swapChainSupport.capabilities.minImageExtent.height,
+				swapChainSupport.capabilities.maxImageExtent.width, swapChainSupport.capabilities.maxImageExtent.height,
+				swapchainSize.width, swapchainSize.height);
+		}
 
-	if (createSwapchainInfo.oldSwapchain)
-	{
-		dev.destroySwapchainKHR(createSwapchainInfo.oldSwapchain, nullptr, vkDynLoader);
-	}
+		// pick swapchain image count (triple-buffering, if possible)
+		uint32_t swapchainDesiredImageCount = std::max<uint32_t>(3, swapChainSupport.capabilities.minImageCount);
+		if (swapChainSupport.capabilities.maxImageCount > 0) // maxImageCount may be 0, in which case there is no defined upper limit
+		{
+			swapchainDesiredImageCount = std::min<uint32_t>(swapchainDesiredImageCount, swapChainSupport.capabilities.maxImageCount);
+		}
+		ASSERT(swapchainDesiredImageCount >= 2, "swapchainDesiredImageCount: %" PRIu32, swapchainDesiredImageCount);
+		if (swapchainDesiredImageCount != 3)
+		{
+			debug(LOG_3D, "Clamped swapchainDesiredImageCount: %" PRIu32" (minImageCount: %" PRIu32", maxImageCount: %" PRIu32")",
+				  swapchainDesiredImageCount, swapChainSupport.capabilities.minImageCount, swapChainSupport.capabilities.maxImageCount);
+		}
 
-	// createSwapchainImageViews
-	swapchainImages = dev.getSwapchainImagesKHR(swapchain, vkDynLoader);
-	debug(LOG_3D, "Requested swapchain minImageCount: %" PRIu32", received: %zu", swapchainDesiredImageCount, swapchainImages.size());
-	try {
-		std::transform(swapchainImages.begin(), swapchainImages.end(), std::back_inserter(swapchainImageView),
-				   [&](const vk::Image& img) {
-					   return dev.createImageView(
-												  vk::ImageViewCreateInfo()
-												  .setImage(img)
-												  .setFormat(surfaceFormat.format)
-												  .setViewType(vk::ImageViewType::e2D)
-												  .setComponents(vk::ComponentMapping())
-												  .setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1))
-												  , nullptr, vkDynLoader);
-				   });
-	}
-	catch (const vk::SystemError &e) {
-		// Documented possibilities: vk::OutOfHostMemoryError, vk::OutOfDeviceMemoryError, vk::InvalidOpaqueCaptureAddressError
-		auto resultErr = static_cast<vk::Result>(e.code().value());
-		debug(LOG_ERROR, "vkCreateImageView(swapchainImages): %s: %s", vk::to_string(resultErr).c_str(), e.what());
-		throw;
+		// pick surface format
+		surfaceFormat = chooseSwapSurfaceFormat(swapChainSupport.formats);
+		debug(LOG_3D, "Using surface format: %s - %s", to_string(surfaceFormat.format).c_str(), to_string(surfaceFormat.colorSpace).c_str());
+
+		// pick compositeAlpha
+		vk::CompositeAlphaFlagBitsKHR compositeAlphaMode = vk::CompositeAlphaFlagBitsKHR::eOpaque;
+		if (swapChainSupport.capabilities.supportedCompositeAlpha & vk::CompositeAlphaFlagBitsKHR::eOpaque)
+		{
+			compositeAlphaMode = vk::CompositeAlphaFlagBitsKHR::eOpaque;
+		}
+		else if (swapChainSupport.capabilities.supportedCompositeAlpha & vk::CompositeAlphaFlagBitsKHR::eInherit)
+		{
+			compositeAlphaMode = vk::CompositeAlphaFlagBitsKHR::eInherit;
+		}
+		else
+		{
+			debug(LOG_INFO, "Unable to find expected supportedCompositeAlpha option (value is: %s) - will attempt opaque", to_string(swapChainSupport.capabilities.supportedCompositeAlpha).c_str());
+		}
+		debug(LOG_3D, "Using supportedCompositeAlpha: %s", to_string(compositeAlphaMode).c_str());
+
+		const vk::ImageUsageFlags desiredScreenshotUsage =
+			vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferSrc;
+		_swapchainSupportsScreenshotReadback =
+			(swapChainSupport.capabilities.supportedUsageFlags & desiredScreenshotUsage) == desiredScreenshotUsage;
+		if (!_swapchainSupportsScreenshotReadback)
+		{
+			debug(LOG_WARNING, "Swapchain does not support TRANSFER_SRC; Vulkan screenshots disabled");
+		}
+
+		vk::SwapchainCreateInfoKHR createSwapchainInfo = vk::SwapchainCreateInfoKHR()
+			.setSurface(surface)
+			.setMinImageCount(swapchainDesiredImageCount)
+			.setPresentMode(presentMode)
+			.setImageUsage(_swapchainSupportsScreenshotReadback
+				? desiredScreenshotUsage
+				: vk::ImageUsageFlagBits::eColorAttachment)
+			.setImageArrayLayers(1)
+			.setCompositeAlpha(compositeAlphaMode)
+			.setClipped(true)
+			.setImageExtent(swapchainSize)
+			.setImageFormat(surfaceFormat.format)
+			.setImageColorSpace(surfaceFormat.colorSpace)
+			.setImageSharingMode(vk::SharingMode::eExclusive)
+			.setOldSwapchain(swapchain);
+
+		// Handle separate graphicsFamily and presentFamily indices (i.e. separate graphics and presentation queues)
+		uint32_t queueFamilyIndicesU32[] = {queueFamilyIndices.graphicsFamily.value(), queueFamilyIndices.presentFamily.value()};
+		if (queueFamilyIndices.graphicsFamily != queueFamilyIndices.presentFamily)
+		{
+			debug(LOG_3D, "Using separate graphics (%" PRIu32") and presentation (%" PRIu32") queue families", queueFamilyIndices.graphicsFamily.value(), queueFamilyIndices.presentFamily.value());
+			createSwapchainInfo.setImageSharingMode(vk::SharingMode::eConcurrent);
+			createSwapchainInfo.setQueueFamilyIndexCount(2);
+			createSwapchainInfo.setPQueueFamilyIndices(queueFamilyIndicesU32);
+		}
+
+		try {
+			swapchain = dev.createSwapchainKHR(createSwapchainInfo, nullptr, vkDynLoader);
+		}
+		// Potential future TODO: Handle surface lost?
+		catch (const vk::SystemError &e) {
+			// Expected possibilities: vk::OutOfHostMemoryError, vk::OutOfDeviceMemoryError, vk::InitializationFailedError, surface lost, device lost, etc
+			auto resultErr = static_cast<vk::Result>(e.code().value());
+			debug(LOG_ERROR, "vk::Device::createSwapchainKHR: failed with error: %s: %s", vk::to_string(resultErr).c_str(), e.what());
+			throw;
+		}
+
+		if (createSwapchainInfo.oldSwapchain)
+		{
+			dev.destroySwapchainKHR(createSwapchainInfo.oldSwapchain, nullptr, vkDynLoader);
+		}
+
+		// createSwapchainImageViews
+		swapchainImages = dev.getSwapchainImagesKHR(swapchain, vkDynLoader);
+		debug(LOG_3D, "Requested swapchain minImageCount: %" PRIu32", received: %zu", swapchainDesiredImageCount, swapchainImages.size());
+		try {
+			std::transform(swapchainImages.begin(), swapchainImages.end(), std::back_inserter(swapchainImageView),
+					   [&](const vk::Image& img) {
+						   return dev.createImageView(
+													  vk::ImageViewCreateInfo()
+													  .setImage(img)
+													  .setFormat(surfaceFormat.format)
+													  .setViewType(vk::ImageViewType::e2D)
+													  .setComponents(vk::ComponentMapping())
+													  .setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1))
+													  , nullptr, vkDynLoader);
+					   });
+		}
+		catch (const vk::SystemError &e) {
+			// Documented possibilities: vk::OutOfHostMemoryError, vk::OutOfDeviceMemoryError, vk::InvalidOpaqueCaptureAddressError
+			auto resultErr = static_cast<vk::Result>(e.code().value());
+			debug(LOG_ERROR, "vkCreateImageView(swapchainImages): %s: %s", vk::to_string(resultErr).c_str(), e.what());
+			throw;
+		}
 	}
 	//
 
@@ -4818,6 +5021,12 @@ bool VkRoot::_initialize(const gfx_api::backend_Impl_Factory& impl, int32_t anti
 	{
 		debug(LOG_ERROR, "Failed to get Vulkan backend implementation");
 		return false;
+	}
+
+	externalPresenter = backend_impl->getExternalPresenter();
+	if (externalPresenter)
+	{
+		debug(LOG_3D, "Using external presenter (no VkSurfaceKHR / VkSwapchainKHR)");
 	}
 
 	SetVKImplicitLayerEnvironmentVariables(backend_impl->allowImplicitLayers());
@@ -5066,7 +5275,8 @@ bool VkRoot::_initialize(const gfx_api::backend_Impl_Factory& impl, int32_t anti
 	debug(LOG_3D, "Using sample count: %s", to_string(msaaSamples).c_str());
 
 	try {
-		debugInfo.Output_SurfaceInformation(physicalDevice, surface, vkDynLoader);
+		if (surface)
+			debugInfo.Output_SurfaceInformation(physicalDevice, surface, vkDynLoader);
 	}
 	catch (const vk::SystemError& e)
 	{
@@ -5093,6 +5303,15 @@ bool VkRoot::_initialize(const gfx_api::backend_Impl_Factory& impl, int32_t anti
 	}
 
 	getQueues();
+
+	if (externalPresenter)
+	{
+		if (!externalPresenter->deviceReady(static_cast<VkInstance>(inst), static_cast<VkPhysicalDevice>(physicalDevice), static_cast<VkDevice>(dev), queueFamilyIndices.graphicsFamily.value(), 0))
+		{
+			debug(LOG_ERROR, "externalPresenter->deviceReady failed");
+			return false;
+		}
+	}
 
 	hasGpuTimestampSupport = initGpuTimestampSupport();
 	debug(LOG_3D, "* GPU timestamp query support: %s", hasGpuTimestampSupport ? "true" : "false");
@@ -5254,6 +5473,13 @@ bool VkRoot::createSurface()
 	ASSERT(backend_impl, "Backend implementation is null");
 	ASSERT(inst, "Instance is null");
 
+	if (externalPresenter)
+	{
+		// Presentation is owned by the external presenter
+		surface = vk::SurfaceKHR{};
+		return true;
+	}
+
 	VkSurfaceKHR _surface = VK_NULL_HANDLE;
 	if (!backend_impl->createWindowSurface(static_cast<VkInstance>(inst), &_surface))
 	{
@@ -5267,9 +5493,27 @@ bool VkRoot::createSurface()
 bool VkRoot::getQueueFamiliesInfo()
 {
 	ASSERT(physicalDevice, "Physical device is null");
-	ASSERT(surface, "Surface is null");
 
-	queueFamilyIndices = findQueueFamilies(physicalDevice, surface, vkDynLoader);
+	if (externalPresenter)
+	{
+		// No surface: the external presenter consumes images from the graphics queue
+		queueFamilyIndices = QueueFamilyIndices();
+		const auto families = physicalDevice.getQueueFamilyProperties(vkDynLoader);
+		for (uint32_t i = 0; i < families.size(); ++i)
+		{
+			if (families[i].queueCount > 0 && (families[i].queueFlags & vk::QueueFlagBits::eGraphics))
+			{
+				queueFamilyIndices.graphicsFamily = i;
+				queueFamilyIndices.presentFamily = i;
+				break;
+			}
+		}
+	}
+	else
+	{
+		ASSERT(surface, "Surface is null");
+		queueFamilyIndices = findQueueFamilies(physicalDevice, surface, vkDynLoader);
+	}
 	ASSERT_OR_RETURN(false, queueFamilyIndices.isComplete(), "Did not receive complete indices from findQueueFamilies");
 
 	// check for optional features of queue family
@@ -5291,12 +5535,19 @@ bool VkRoot::getQueueFamiliesInfo()
 bool VkRoot::createLogicalDevice()
 {
 	ASSERT(physicalDevice, "Physical device is null");
-	ASSERT(surface, "Surface is null");
+	ASSERT(surface || externalPresenter, "Surface is null");
 
 	ASSERT_OR_RETURN(false, queueFamilyIndices.isComplete(), "Did not receive complete indices from findQueueFamilies");
 
 	// determine extensions to use
-	enabledDeviceExtensions = deviceExtensions;
+	if (externalPresenter)
+	{
+		enabledDeviceExtensions.clear(); // no VK_KHR_swapchain needed
+	}
+	else
+	{
+		enabledDeviceExtensions = deviceExtensions;
+	}
 	auto supportedOptionalExtensions = findSupportedDeviceExtensions(physicalDevice, optionalDeviceExtensions, vkDynLoader);
 	enabledDeviceExtensions.insert(std::end(enabledDeviceExtensions), supportedOptionalExtensions.begin(), supportedOptionalExtensions.end());
 
@@ -5342,7 +5593,20 @@ bool VkRoot::createLogicalDevice()
 		.setPQueueCreateInfos(queueCreateInfos.data());
 
 	try {
-		dev = physicalDevice.createDevice(deviceCreateInfo, nullptr, vkDynLoader);
+		if (externalPresenter)
+		{
+			VkDevice externalDevice = VK_NULL_HANDLE;
+			if (!externalPresenter->createDevice(vkDynLoader.vkGetInstanceProcAddr, static_cast<VkPhysicalDevice>(physicalDevice), *reinterpret_cast<const VkDeviceCreateInfo*>(&deviceCreateInfo), externalDevice))
+			{
+				debug(LOG_ERROR, "externalPresenter->createDevice failed");
+				return false;
+			}
+			dev = vk::Device(externalDevice);
+		}
+		else
+		{
+			dev = physicalDevice.createDevice(deviceCreateInfo, nullptr, vkDynLoader);
+		}
 	}
 	catch (const vk::SystemError& e)
 	{
@@ -6139,6 +6403,21 @@ void VkRoot::bind_pipeline(gfx_api::pipeline_state_object* pso, bool /*notexture
 // throws a vk::SystemError on an unrecoverable error (like OOM)
 VkRoot::SwapchainAcquireStatus VkRoot::tryAcquireSwapchainImage()
 {
+	if (externalPresenter)
+	{
+		uint32_t index = 0;
+		if (!externalPresenter->acquireTargetImage(index))
+		{
+			// Nothing to render this frame (e.g. XR session not visible)
+			return SwapchainAcquireStatus::Skipped;
+		}
+		ASSERT(index < swapchainImages.size(), "External presenter returned invalid image index: %" PRIu32, index);
+		currentSwapchainIndex = index;
+		buffering_mechanism::get_current_resources().swapchainImageAcquired = true;
+		_frameLayoutTracker.beginFrame();
+		return SwapchainAcquireStatus::Success;
+	}
+
 	vk::ResultValue<uint32_t> acquireNextImageResult = vk::ResultValue<uint32_t>(vk::Result::eNotReady, 0);
 	try {
 		acquireNextImageResult = dev.acquireNextImageKHR(swapchain, -1, buffering_mechanism::get_current_resources().imageAcquireSemaphore, vk::Fence(), vkDynLoader);
@@ -6256,6 +6535,18 @@ gfx_api::PipelineSurfaceSyncInputs VkRoot::pipelineSurfaceSyncInputs() const
 		const uint32_t scalePercent = getSceneRenderScalePercent();
 		inputs.sceneW = std::max((w * scalePercent) / 100u, 2u);
 		inputs.sceneH = std::max((h * scalePercent) / 100u, 2u);
+
+		VkExtent2D eyeExtent = {0, 0};
+		if (externalPresenter && externalPresenter->supportsStereo() && externalPresenter->getRecommendedEyeExtent(eyeExtent)
+			&& eyeExtent.width > 0 && eyeExtent.height > 0)
+		{
+			// The 3D scene is rendered per eye: size the scene surfaces for the eyes, and the
+			// swapchain-sized ones (depth) to fit both the eye targets and the overlay target
+			inputs.sceneW = std::max((eyeExtent.width * scalePercent) / 100u, 2u);
+			inputs.sceneH = std::max((eyeExtent.height * scalePercent) / 100u, 2u);
+			inputs.drawableW = std::max(w, eyeExtent.width);
+			inputs.drawableH = std::max(h, eyeExtent.height);
+		}
 	}
 	inputs.shadowMapSize = depthMapSize;
 	inputs.numShadowCascades = static_cast<uint32_t>(std::min<size_t>(depthPassCount, WZ_MAX_SHADOW_CASCADES));
@@ -6370,6 +6661,10 @@ vk::Image VkRoot::getVkImageHandle(gfx_api::abstract_texture* texture) const
 	}
 	if (dynamic_cast<VkSwapchainColorSurface*>(texture) != nullptr)
 	{
+		if (_eyeTargetOverride.has_value())
+		{
+			return _eyeTargetOverride->image;
+		}
 		ASSERT_OR_RETURN(vk::Image(), currentSwapchainIndex < swapchainImages.size(),
 			"Swapchain image index out of range");
 		return swapchainImages[currentSwapchainIndex];
@@ -6568,6 +6863,10 @@ vk::ImageView VkRoot::getAttachmentImageView(const gfx_api::AttachmentDesc& atta
 	}
 	if (dynamic_cast<VkSwapchainColorSurface*>(attachment.texture) != nullptr)
 	{
+		if (_eyeTargetOverride.has_value())
+		{
+			return _eyeTargetOverride->view;
+		}
 		ASSERT_OR_RETURN(vk::ImageView(), !swapchainImageView.empty(), "No swapchain image views");
 		ASSERT_OR_RETURN(vk::ImageView(), currentSwapchainIndex < swapchainImageView.size(),
 			"Swapchain index out of range");
@@ -6691,9 +6990,10 @@ optional<std::pair<uint32_t, uint32_t>> VkRoot::getRenderTargetDimensions(gfx_ap
 	if (dynamic_cast<VkSwapchainColorSurface*>(texture) != nullptr
 		|| dynamic_cast<VkSwapchainDepthSurface*>(texture) != nullptr)
 	{
-		if (swapchainSize.width > 0 && swapchainSize.height > 0)
+		const vk::Extent2D extent = swapchainTargetExtent();
+		if (extent.width > 0 && extent.height > 0)
 		{
-			return std::make_pair(swapchainSize.width, swapchainSize.height);
+			return std::make_pair(extent.width, extent.height);
 		}
 	}
 	if (texture == getPipelineSurface(gfx_api::PipelineSurfaceId::SceneColor)
@@ -6810,9 +7110,9 @@ void perFrameResources_t::submitCommandBuffers(const FrameQueueSubmitParams& sub
 		.setCommandBufferCount(state.submitDrawBuffer ? static_cast<uint32_t>(executableCmdBuffer.size()) : 1)
 		.setPCommandBuffers(executableCmdBuffer.data());
 
-	if (state.submitDrawBuffer)
+	// External presenters (OpenXR) synchronize on the queue itself: no acquire / render-finished semaphores
+	if (state.submitDrawBuffer && submit.renderFinishedSemaphore != nullptr)
 	{
-		ASSERT(submit.renderFinishedSemaphore != nullptr, "submitDrawBuffer requires renderFinishedSemaphore");
 		submitInfo
 			.setWaitSemaphoreCount(1)
 			.setPWaitSemaphores(&imageAcquireSemaphore)
@@ -6883,7 +7183,7 @@ void VkRoot::sealAndSubmitTransferGraphics(ScreenFramePipelineState& state)
 		FrameQueueSubmitParams submitParams{
 			graphicsQueue,
 			vkDynLoader,
-			state.submitDrawBuffer
+			state.submitDrawBuffer && !externalPresenter
 				? &buffering_mechanism::get_swapchain_resources(currentSwapchainIndex).renderFinishedSemaphore
 				: nullptr,
 		};
@@ -6951,7 +7251,8 @@ void VkRoot::sealDrawCommandBufferForPresent()
 	}
 	else if (swapchainColor && _frameLayoutTracker.swapchainTouchedThisFrame())
 	{
-		_frameLayoutTracker.transitionSwapchainToPresent(*this, drawCmdBuffer, swapchainColor);
+		_frameLayoutTracker.transitionSwapchainToPresent(*this, drawCmdBuffer, swapchainColor,
+			externalPresenter ? vk::ImageLayout::eColorAttachmentOptimal : vk::ImageLayout::ePresentSrcKHR);
 	}
 
 	drawCmdBuffer.end(vkDynLoader);
@@ -7095,8 +7396,15 @@ void VkRoot::beginPass(const gfx_api::RenderPassDesc& pass, const gfx_api::Compi
 	hasActivePass = true;
 	_activePassTargetsSwapchain = gfx_api::passTargetsSwapchainColor(pass);
 
-	const uint32_t passWidth = pass.viewportSize->first;
-	const uint32_t passHeight = pass.viewportSize->second;
+	uint32_t passWidth = pass.viewportSize->first;
+	uint32_t passHeight = pass.viewportSize->second;
+	if (_activePassTargetsSwapchain && externalPresenter)
+	{
+		// The compiled viewport assumes one drawable size; eye targets and the overlay target differ
+		const vk::Extent2D extent = swapchainTargetExtent();
+		passWidth = extent.width;
+		passHeight = extent.height;
+	}
 
 	size_t renderPassId = INVALID_RENDER_PASS_ID;
 	if (compiledPass != nullptr)
@@ -7163,6 +7471,12 @@ void VkRoot::beginPass(const gfx_api::RenderPassDesc& pass, const gfx_api::Compi
 	for (const auto& colorAttachment : pass.colorAttachments)
 	{
 		const auto& c = colorAttachment.clearValue.color;
+		if (_overlayTargetTransparent
+			&& dynamic_cast<VkSwapchainColorSurface*>(colorAttachment.texture) != nullptr)
+		{
+			_clearValuesScratch.push_back(vk::ClearColorValue(std::array<float, 4> {0.f, 0.f, 0.f, 0.f}));
+			continue;
+		}
 		_clearValuesScratch.push_back(vk::ClearColorValue(std::array<float, 4> {c[0], c[1], c[2], c[3]}));
 	}
 	if (pass.depthAttachment.has_value() && pass.depthAttachment->texture != nullptr)

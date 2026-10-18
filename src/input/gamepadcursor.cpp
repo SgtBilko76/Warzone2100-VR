@@ -34,6 +34,8 @@
 #include "lib/widget/form.h"
 #include "lib/ivis_opengl/pieblitfunc.h"
 #include "lib/ivis_opengl/piepalette.h"
+#include "../vr_diorama.h"
+#include "../vr_keyboard.h"
 #include "lib/ivis_opengl/pietypes.h"
 #include "lib/ivis_opengl/screen.h"
 
@@ -89,30 +91,40 @@ public:
 
 	void display(int xOffset, int yOffset) override
 	{
-		if (!isGamepadActiveInput())
+		// VR: over the battlefield the cursor is drawn on the table (see display3d_recordSceneOverlays)
+		if (vrDioramaDrawingHud() && !isMouseOverAnyWidget())
 		{
 			return;
 		}
-		const CURSOR cur = wzGetCursor();
-		if (cur >= CURSOR_MAX)
-		{
-			return;
-		}
-		int hotX = 0;
-		int hotY = 0;
-		const iV_Image* image = wzGetCursorImage(cur, hotX, hotY);
-		if (!image)
-		{
-			return;
-		}
-		gfx_api::texture* texture = getCursorTexture(cur, *image);
-		if (!texture)
-		{
-			return;
-		}
-		iV_DrawImageAnisotropic(*texture, Vector2i(mouseX() - hotX, mouseY() - hotY), Vector2f(0.f, 0.f), Vector2f(image->width(), image->height()), 0.f, WZCOL_WHITE);
+		gamepadCursorDraw();
 	}
 };
+
+void gamepadCursorDraw()
+{
+	if (!isGamepadActiveInput())
+	{
+		return;
+	}
+	const CURSOR cur = wzGetCursor();
+	if (cur >= CURSOR_MAX)
+	{
+		return;
+	}
+	int hotX = 0;
+	int hotY = 0;
+	const iV_Image* image = wzGetCursorImage(cur, hotX, hotY);
+	if (!image)
+	{
+		return;
+	}
+	gfx_api::texture* texture = getCursorTexture(cur, *image);
+	if (!texture)
+	{
+		return;
+	}
+	iV_DrawImageAnisotropic(*texture, Vector2i(mouseX() - hotX, mouseY() - hotY), Vector2f(0.f, 0.f), Vector2f(image->width(), image->height()), 0.f, WZCOL_WHITE);
+}
 
 bool gamepadCursorInit()
 {
@@ -156,6 +168,14 @@ void gamepadCursorUpdateWidgetMagnet()
 	// of the mouse state while the button remains held
 	if (mouseDown(MOUSE_LMB) || mouseDown(MOUSE_RMB) || gamepadSyntheticClickHeld())
 	{
+		return;
+	}
+
+	// on the virtual keyboard, snap to its keys (the widgets hidden below it don't count)
+	int keyX = 0, keyY = 0, keyRadius = 0;
+	if (vrKeyboardMagnetTarget(mouseX(), mouseY(), keyX, keyY, keyRadius))
+	{
+		gamepadSetCursorMagnetTarget(keyX, keyY, keyRadius);
 		return;
 	}
 

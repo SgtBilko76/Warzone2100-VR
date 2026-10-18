@@ -39,6 +39,10 @@
 #include "src/warzoneconfig.h"
 #include "src/game.h"
 #include "gfx_api_sdl.h"
+#if defined(WZ_OPENXR_ENABLED)
+# include "wz_openxr.h"
+# include "wz_openxr_gamepad.h"
+#endif
 #include "gfx_api_gl_sdl.h"
 #include "sdl_backend_private.h"
 
@@ -239,6 +243,9 @@ static InputKey	pInputBuffer[INPUT_MAXSTR];
 static InputKey	*pStartBuffer, *pEndBuffer;
 static utf_32_char *utf8Buf;				// is like the old 'unicode' from SDL 1.x
 void* GetTextEventsOwner = nullptr;
+static WzTextInputRect currentTextInputRect = {0, 0, 0, 0};	// the text input owner's on-screen rect
+static MouseButtonFilterFunc mouseButtonFilter = nullptr;
+static bool mouseButtonFiltered[MOUSE_END] = {};	// press swallowed by the filter - swallow its release too
 
 /* Touch / finger handling */
 
@@ -357,6 +364,7 @@ void StartTextInput(void* pTextInputRequester, const WzTextInputRect& textInputR
 		debug(LOG_INPUT, "StartTextInput called by new input requester before old requester called StopTextInput");
 	}
 	GetTextEventsOwner = pTextInputRequester;
+	currentTextInputRect = textInputRect;
 
 	// on some platforms, it seems like we also need to call SDL_SetTextInputRect every frame to properly set the text input rect (?)
 	SDL_Rect rect;
@@ -388,6 +396,17 @@ void StopTextInput(void* pTextInputResigner)
 	SDL_StopTextInput(WZwindow);	// disable text events
 	GetTextEventsOwner = nullptr;
 	debug(LOG_INPUT, "SDL text events stopped");
+}
+
+bool wzGetTextInputField(void*& owner, WzTextInputRect& rect)
+{
+	if (!GetTextEventsOwner)
+	{
+		return false;
+	}
+	owner = GetTextEventsOwner;
+	rect = currentTextInputRect;
+	return true;
 }
 
 bool isInTextInputMode()
@@ -466,6 +485,10 @@ std::vector<video_backend> wzAvailableGfxBackends()
 // EMSCRIPTEN:
 	// - Only supports OpenGL ES (WebGL) backend
 	availableBackends.push_back(video_backend::opengles);
+#elif defined(__ANDROID__) && defined(WZ_OPENXR_ENABLED)
+// ANDROID (standalone VR headsets):
+	// - Only Vulkan (OpenXR renders through XR_KHR_vulkan_enable2)
+	availableBackends.push_back(video_backend::vulkan);
 #elif defined(WZ_OS_WIN)
 // WINDOWS:
 # if defined(_M_X64) || defined(_M_IX86)
@@ -592,7 +615,37 @@ bool SDL_WZBackend_GetDrawableSize(SDL_Window* window,
 	{
 		return false;
 	}
+#if defined(WZ_OPENXR_ENABLED)
+	if (wzxr::isActive())
+	{
+		// The game renders to the XR virtual screen, not the (invisible) Android window
+		wzxr::getTargetSize(*w, *h);
+		return true;
+	}
+#endif
 	return SDL_GetWindowSizeInPixels(window, w, h);
+}
+
+bool wzVrMixedRealityActive()
+{
+#if defined(WZ_OPENXR_ENABLED)
+	return wzxr::isActive() && wzxr::mixedRealityActive();
+#else
+	return false;
+#endif
+}
+
+// The logical window size the game lays itself out for (the XR virtual screen when in VR)
+static bool wzGetLogicalWindowSize(SDL_Window* window, int* w, int* h)
+{
+#if defined(WZ_OPENXR_ENABLED)
+	if (wzxr::isActive())
+	{
+		wzxr::getTargetSize(*w, *h);
+		return true;
+	}
+#endif
+	return SDL_GetWindowSize(window, w, h);
 }
 
 void setDisplayScale(unsigned int displayScale)
@@ -1354,6 +1407,36 @@ void inputAddEditingKey(KEY_CODE code)
 	}
 }
 
+void inputAddVirtualKey(KEY_CODE code)
+{
+	inputAddEditingKey(code);
+}
+
+void inputAddVirtualText(utf_32_char unicode)
+{
+	if (unicode != 0)
+	{
+		inputAddBuffer(0, unicode);
+	}
+}
+
+void inputSetMouseButtonFilter(MouseButtonFilterFunc filter)
+{
+	mouseButtonFilter = filter;
+}
+
+static PointerTargetTestFunc pointerTargetTest = nullptr;
+
+void inputSetPointerTargetTest(PointerTargetTestFunc test)
+{
+	pointerTargetTest = test;
+}
+
+bool inputPointerTargetAt(int x, int y)
+{
+	return !pointerTargetTest || pointerTargetTest(x, y);
+}
+
 // Returns the human-readable name for the key *in the current keyboard layout*
 void keyScanToString(KEY_CODE code, char *ascii, UDWORD maxStringSize)
 {
@@ -2067,6 +2150,22 @@ void inputSetMouseButton(MOUSE_KEY_CODE mouseKeyCode, bool pressed, Vector2i log
 	mouseXPos = logicalPos.x;
 	mouseYPos = logicalPos.y;
 
+	// e.g. the virtual keyboard: a swallowed press never reaches the widgets (an edit box would lose focus)
+	if (mouseKeyCode < MOUSE_END)
+	{
+		const bool swallow = mouseButtonFilter && mouseButtonFilter(mouseKeyCode, pressed, logicalPos);
+		if (pressed && swallow)
+		{
+			mouseButtonFiltered[mouseKeyCode] = true;
+			return;
+		}
+		if (!pressed && mouseButtonFiltered[mouseKeyCode])
+		{
+			mouseButtonFiltered[mouseKeyCode] = false;
+			return;
+		}
+	}
+
 	MousePress mousePress;
 	mousePress.key = mouseKeyCode;
 	mousePress.pos = logicalPos;
@@ -2723,7 +2822,7 @@ bool wzChangeWindowResolution(int screen, unsigned int width, unsigned int heigh
 	// Get current window size + position + bounds
 	int prev_x = 0, prev_y = 0, prev_width = 0, prev_height = 0;
 	SDL_GetWindowPosition(WZwindow, &prev_x, &prev_y);
-	SDL_GetWindowSize(WZwindow, &prev_width, &prev_height);
+	wzGetLogicalWindowSize(WZwindow, &prev_width, &prev_height);
 
 	// Get the usable bounds for the current screen
 	SDL_Rect bounds;
@@ -2784,7 +2883,7 @@ bool wzChangeWindowResolution(int screen, unsigned int width, unsigned int heigh
 
 	// Check that the new size is the desired size
 	int resultingWidth, resultingHeight = 0;
-	SDL_GetWindowSize(WZwindow, &resultingWidth, &resultingHeight);
+	wzGetLogicalWindowSize(WZwindow, &resultingWidth, &resultingHeight);
 	if (resultingWidth != width || resultingHeight != height) {
 		// Attempting to set the resolution failed
 		debug(LOG_WZ, "Attempting to change the resolution to %dx%d seems to have failed (result: %dx%d).", width, height, resultingWidth, resultingHeight);
@@ -2854,7 +2953,7 @@ void wzGetWindowResolution(int *screen, unsigned int *width, unsigned int *heigh
 	}
 
 	int currentWidth = 0, currentHeight = 0;
-	SDL_GetWindowSize(WZwindow, &currentWidth, &currentHeight);
+	wzGetLogicalWindowSize(WZwindow, &currentWidth, &currentHeight);
 	assert(currentWidth >= 0);
 	assert(currentHeight >= 0);
 	if (width != nullptr)
@@ -3380,7 +3479,7 @@ optional<SDL_gfx_api_Impl_Factory::Configuration> wzMainScreenSetup_CreateVideoW
 
 	// Get resulting logical window size
 	int resultingWidth, resultingHeight = 0;
-	SDL_GetWindowSize(WZwindow, &resultingWidth, &resultingHeight);
+	wzGetLogicalWindowSize(WZwindow, &resultingWidth, &resultingHeight);
 
 	// Check that the actual window size matches the desired window size (but not for classic fullscreen mode)
 	if ((wzGetCurrentWindowMode() != WINDOW_MODE::fullscreen) && (resultingWidth < minWindowWidth || resultingHeight < minWindowHeight))
@@ -3421,7 +3520,7 @@ optional<SDL_gfx_api_Impl_Factory::Configuration> wzMainScreenSetup_CreateVideoW
 			SDL_SyncWindow(WZwindow);
 
 			// Re-request resulting window size
-			SDL_GetWindowSize(WZwindow, &resultingWidth, &resultingHeight);
+			wzGetLogicalWindowSize(WZwindow, &resultingWidth, &resultingHeight);
 		}
 	}
 	ASSERT(resultingWidth > 0 && resultingHeight > 0, "Invalid - SDL returned window width: %d, window height: %d", resultingWidth, resultingHeight);
@@ -3640,6 +3739,13 @@ static bool wzAttemptInitializeBackend(optional<video_backend> backend, int32_t 
 			gfxapi_backend = gfx_api::backend_type::opengl_backend;
 		}
 	}
+
+#if defined(WZ_OPENXR_ENABLED)
+	if (gfxapi_backend == gfx_api::backend_type::vulkan_backend && !wzxr::initialize())
+	{
+		debug(LOG_ERROR, "OpenXR is unavailable - rendering to the window instead");
+	}
+#endif
 
 	if (!gfx_api::context::initialize(SDL_gfx_api_Impl_Factory(WZwindow, sdl_impl_config), antialiasing, swapMode, lodDistanceBias, depthMapResolution, gfxapi_backend))
 	{
@@ -3908,7 +4014,7 @@ void wzGetWindowToRendererScaleFactor(float *horizScaleFactor, float *vertScaleF
 
 	// Obtain the logical window size (in points)
 	int logicalWindowWidth = 0, logicalWindowHeight = 0;
-	SDL_GetWindowSize(WZwindow, &logicalWindowWidth, &logicalWindowHeight);
+	wzGetLogicalWindowSize(WZwindow, &logicalWindowWidth, &logicalWindowHeight);
 
 	debug(LOG_WZ, "Window Logical Size (%d, %d) vs Drawable Size in Pixels (%d, %d)", logicalWindowWidth, logicalWindowHeight, drawableWidth, drawableHeight);
 
@@ -4045,7 +4151,7 @@ static void handleActiveEvent(SDL_Event *event)
 				debug(LOG_WZ, "Window resized to window flags: %u", windowFlags);
 
 				int newWindowWidth = 0, newWindowHeight = 0;
-				SDL_GetWindowSize(WZwindow, &newWindowWidth, &newWindowHeight);
+				wzGetLogicalWindowSize(WZwindow, &newWindowWidth, &newWindowHeight);
 				windowWidth = static_cast<unsigned int>(newWindowWidth);
 				windowHeight = static_cast<unsigned int>(newWindowHeight);
 
@@ -4091,7 +4197,7 @@ static void handleActiveEvent(SDL_Event *event)
 				unsigned int oldWindowHeight = windowHeight;
 
 				int newWindowWidth = 0, newWindowHeight = 0;
-				SDL_GetWindowSize(WZwindow, &newWindowWidth, &newWindowHeight);
+				wzGetLogicalWindowSize(WZwindow, &newWindowWidth, &newWindowHeight);
 
 				int newDrawableWidth = 0, newDrawableHeight = 0;
 				SDL_WZBackend_GetDrawableSize(WZwindow, &newDrawableWidth, &newDrawableHeight);
@@ -4174,6 +4280,18 @@ void wzEventLoopOneFrame(void* arg)
 	}
 #endif
 
+#if defined(WZ_OPENXR_ENABLED)
+	wzxr::pollEvents();
+	wzOpenXRGamepadUpdate(); // before pumping SDL events, so button changes arrive this frame
+	if (wzxr::exitRequested())
+	{
+		SDL_Event quitEvent;
+		SDL_zero(quitEvent);
+		quitEvent.type = SDL_EVENT_QUIT;
+		SDL_PushEvent(&quitEvent);
+	}
+#endif
+
 	/* Deal with any windows messages */
 	while (SDL_PollEvent(&event))
 	{
@@ -4185,13 +4303,22 @@ void wzEventLoopOneFrame(void* arg)
 			break;
 		case SDL_EVENT_MOUSE_BUTTON_UP:
 		case SDL_EVENT_MOUSE_BUTTON_DOWN:
-			inputHandleMouseButtonEvent(&event.button);
+			if (!wzGamepadIsExclusive())
+			{
+				inputHandleMouseButtonEvent(&event.button);
+			}
 			break;
 		case SDL_EVENT_MOUSE_MOTION:
-			inputHandleMouseMotionEvent(&event.motion);
+			if (!wzGamepadIsExclusive())
+			{
+				inputHandleMouseMotionEvent(&event.motion);
+			}
 			break;
 		case SDL_EVENT_MOUSE_WHEEL:
-			inputHandleMouseWheelEvent(&event.wheel);
+			if (!wzGamepadIsExclusive())
+			{
+				inputHandleMouseWheelEvent(&event.wheel);
+			}
 			break;
 		case SDL_EVENT_TEXT_INPUT:	// SDL now handles text input differently
 			inputhandleText(&event.text);
@@ -4200,7 +4327,10 @@ void wzEventLoopOneFrame(void* arg)
 		case SDL_EVENT_FINGER_UP:
 		case SDL_EVENT_FINGER_CANCELED:
 		case SDL_EVENT_FINGER_MOTION:
-			inputHandleTouchFingerEvent(event.tfinger);
+			if (!wzGamepadIsExclusive())
+			{
+				inputHandleTouchFingerEvent(event.tfinger);
+			}
 			break;
 #if defined(WZ_SDL_PINCH_EVENTS_SUPPORTED)
 		case SDL_EVENT_PINCH_BEGIN:
@@ -4285,6 +4415,9 @@ void wzMainEventLoop(std::function<void()> onShutdown)
 	event.type = 0;
 
 	wzGamepadInit();
+#if defined(WZ_OPENXR_ENABLED)
+	wzOpenXRGamepadInit(); // forces gamepad support on in VR
+#endif
 
 #if defined(__EMSCRIPTEN__)
 	saved_onShutdown = onShutdown;
@@ -4313,6 +4446,10 @@ void wzPumpEventsWhileLoading()
 void wzShutdown()
 {
 	// order is important!
+#if defined(WZ_OPENXR_ENABLED)
+	wzOpenXRGamepadShutdown();
+	wzxr::shutdown(); // the gfx context (and with it the XR session) is already gone
+#endif
 	wzGamepadShutdown();
 	sdlFreeCursors();
 	if (WZwindow != nullptr)

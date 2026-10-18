@@ -72,8 +72,10 @@ public:
 	void applyPostPassUpdates(const gfx_api::CompiledPass& pass);
 
 	/// Single frame-level swapchain -> Present transition. No-op if swapchain not touched or texture is null.
+	/// External presenters (OpenXR) expect their images back in ColorAttachmentOptimal instead of PresentSrcKHR.
 	void transitionSwapchainToPresent(VkRoot& root, ::vk::CommandBuffer cmd,
-		gfx_api::abstract_texture* swapchainColor);
+		gfx_api::abstract_texture* swapchainColor,
+		::vk::ImageLayout presentLayout = ::vk::ImageLayout::ePresentSrcKHR);
 
 private:
 	std::unordered_map<gfx_api::LayoutSubresourceKey, ::vk::ImageLayout, gfx_api::LayoutSubresourceKeyHash> _layouts;

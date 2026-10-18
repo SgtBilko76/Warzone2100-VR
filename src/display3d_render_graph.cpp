@@ -30,6 +30,7 @@
 #include <glm/gtx/transform.hpp>
 
 #include "display3d_render_graph.h"
+#include "vr_diorama.h"
 
 #include "display.h"
 #include "display3d_render_internal.h"
@@ -119,9 +120,22 @@ static void recordScenePass(const gfx_api::RenderPassContext& passCtx)
 	drawTerrain(fc.perspectiveViewMatrix, fc.viewMatrix, cameraPos, sunPos, fc.shadowCascadesInfo, shadowMap, fc.pointLights);
 	wzPerfEnd(PERF_TERRAIN);
 
-	wzPerfBegin(PERF_SKYBOX, "3D scene - skybox");
-	display3d_renderSurroundings(pie_SkyboxPerspectiveGet(), fc.baseViewMatrix);
-	wzPerfEnd(PERF_SKYBOX);
+	if (!vrDioramaRenderingEye())
+	{
+		wzPerfBegin(PERF_SKYBOX, "3D scene - skybox");
+		display3d_renderSurroundings(pie_SkyboxPerspectiveGet(), fc.baseViewMatrix);
+		wzPerfEnd(PERF_SKYBOX);
+	}
+	else if (!wzVrMixedRealityActive()) // VR: the sky surrounds the player; in mixed reality the room does
+	{
+		glm::mat4 skyPerspective, skyView;
+		if (vrDioramaSkyMatrices(skyPerspective, skyView))
+		{
+			wzPerfBegin(PERF_SKYBOX, "3D scene - skybox");
+			display3d_renderSurroundings(skyPerspective, skyView);
+			wzPerfEnd(PERF_SKYBOX);
+		}
+	}
 
 	wzPerfBegin(PERF_WATER, "3D scene - water");
 	pie_SetFogStatus(true);

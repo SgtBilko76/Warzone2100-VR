@@ -59,8 +59,27 @@ namespace gfx_api
 {
 
 class CachedRenderGraph;
+struct StereoEyeView;
 
 } // namespace gfx_api
+
+/// Stereo (VR) rendering of the in-game 3D scene, registered by the game. For in-game frames it
+/// wants in stereo, the frame graph runs once per eye (3D scene passes only, into the eye targets),
+/// once for the world overlay passes (into the regular target, composited on the table) and once
+/// for the interface (into the HUD panel target).
+struct StereoSceneRenderer
+{
+	virtual ~StereoSceneRenderer() = default;
+	virtual bool wantsStereoFrame() = 0;
+	/// Switches the scene matrices to one eye
+	virtual void beginEye(size_t eye, const gfx_api::StereoEyeView& view) = 0;
+	/// Restores the mono matrices (the overlay passes use them)
+	virtual void endEyes() = 0;
+	/// Brackets the 2D phases: the world overlay (on the table) and the HUD panel
+	virtual void beginOverlay(bool hudPanel) = 0;
+	virtual void endOverlay() = 0;
+};
+void pie_SetStereoSceneRenderer(StereoSceneRenderer* renderer);
 
 gfx_api::CachedRenderGraph& pie_GetCachedFrameRenderGraph();
 

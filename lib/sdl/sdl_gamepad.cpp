@@ -182,9 +182,39 @@ static void markGamepadActive()
 	}
 }
 
+static bool exclusiveGamepadInput = false;
+
+void wzGamepadSetExclusive(bool exclusive)
+{
+	exclusiveGamepadInput = exclusive;
+	if (exclusive)
+	{
+		// start with the cursor in the middle of the screen
+		inputSetMousePos(static_cast<int>(screenWidth / 2), static_cast<int>(screenHeight / 2));
+		markGamepadActive();
+	}
+}
+
+bool wzGamepadIsExclusive()
+{
+	return exclusiveGamepadInput;
+}
+
+static bool pointerModeActive = false;
+
+void wzGamepadSetPointerMode(bool enabled)
+{
+	pointerModeActive = enabled;
+}
+
+bool gamepadPointerMode()
+{
+	return pointerModeActive;
+}
+
 bool wzGamepadNotifyNonGamepadInput()
 {
-	if (!gamepadIsActiveInput)
+	if (!gamepadIsActiveInput || exclusiveGamepadInput)
 	{
 		return false;
 	}
@@ -370,8 +400,20 @@ static bool padHasRumble(SDL_Gamepad* pad)
 	return SDL_GetBooleanProperty(SDL_GetGamepadProperties(pad), SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
 }
 
+static bool virtualDevicesOnly = false;
+
+void wzGamepadSetVirtualDevicesOnly(bool virtualOnly)
+{
+	virtualDevicesOnly = virtualOnly;
+}
+
 static void openGamepadDevice(SDL_JoystickID id)
 {
+	if (virtualDevicesOnly && !SDL_IsJoystickVirtual(id))
+	{
+		debug(LOG_INFO, "Ignoring non-virtual gamepad (id %u): %s", (unsigned)id, SDL_GetGamepadNameForID(id));
+		return;
+	}
 	for (const auto& pad : openGamepads)
 	{
 		if (pad.id == id)
@@ -457,7 +499,7 @@ void wzGamepadShutdown()
 
 void wzGamepadApplyMode()
 {
-	if (war_GetGamepadMode() == GamepadMode::Disabled)
+	if (war_GetGamepadMode() == GamepadMode::Disabled && !exclusiveGamepadInput)
 	{
 		wzGamepadShutdown();
 	}
@@ -817,7 +859,7 @@ static bool drainBankedTravel(float dt)
 // Moves the cursor from left-stick deflection while the gamepad is the active input source
 static void updateVirtualCursor(float dt)
 {
-	if (!gamepadIsActiveInput)
+	if (!gamepadIsActiveInput || pointerModeActive)
 	{
 		return;
 	}

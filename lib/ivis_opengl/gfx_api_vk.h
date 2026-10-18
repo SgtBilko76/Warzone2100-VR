@@ -84,11 +84,55 @@ namespace gfx_api
 	/// Map gfx_api::pixel_format to a Vulkan format (textures + pipeline surfaces).
 	::vk::Format pixelFormatToVkFormat(pixel_format format);
 
+	// Optional externally-owned presentation target (e.g. an OpenXR session).
+	// When a backend implementation provides one, VkRoot creates the instance and
+	// device through it, never creates a VkSurfaceKHR / VkSwapchainKHR, and renders
+	// the frame into the presenter's images instead.
+	class vk_external_presenter
+	{
+	public:
+		virtual ~vk_external_presenter() {};
+
+		// Instance / device creation (OpenXR must create these itself, with its own extensions)
+		virtual bool createInstance(PFN_vkGetInstanceProcAddr gpa, const VkInstanceCreateInfo& createInfo, VkInstance& outInstance) = 0;
+		virtual bool getPhysicalDevice(VkInstance instance, VkPhysicalDevice& outPhysicalDevice) = 0;
+		virtual bool createDevice(PFN_vkGetInstanceProcAddr gpa, VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo& createInfo, VkDevice& outDevice) = 0;
+		// Called once the device and queue exist (starts the XR session)
+		virtual bool deviceReady(VkInstance instance, VkPhysicalDevice physicalDevice, VkDevice device, uint32_t queueFamilyIndex, uint32_t queueIndex) = 0;
+
+		// Render target images (the equivalent of the swapchain images). Rendered into with
+		// COLOR_ATTACHMENT usage and left in COLOR_ATTACHMENT_OPTIMAL layout at frame end.
+		virtual bool createTargetImages(const std::vector<VkFormat>& preferredFormats, VkFormat& outFormat, VkExtent2D& outExtent, std::vector<VkImage>& outImages) = 0;
+		virtual void destroyTargetImages() = 0;
+
+		// Per frame: wait for / acquire the next target image, and hand it back after the queue submit
+		virtual bool acquireTargetImage(uint32_t& outIndex) = 0;
+		virtual void presentTargetImage() = 0;
+
+		// Called before the device is destroyed (the presenter must release everything tied to it)
+		virtual void shutdown() = 0;
+
+		// Optional stereo support: per-eye targets (same format as the target images) for the in-game scene
+		virtual bool supportsStereo() const { return false; }
+		virtual bool getRecommendedEyeExtent(VkExtent2D& outExtent) { return false; }
+		/// Acquires (once per frame) and returns the eye's image, with the view it must be rendered with
+		virtual bool getEyeTarget(size_t eye, VkImage& outImage, VkExtent2D& outExtent, gfx_api::StereoEyeView& outView) { return false; }
+		/// Whether this frame presents the eye images (with the target image as overlay) or the target image alone
+		virtual void setStereoFramePresented(bool presented) {}
+		virtual void setStereoOverlayPlacement(const glm::mat4& trackingFromQuad, float widthMeters, float heightMeters) {}
+		/// Acquires (once per frame) the HUD panel image (same size and format as the target images)
+		virtual bool getHudTarget(VkImage& outImage, VkExtent2D& outExtent) { return false; }
+		virtual void setStereoHudPlacement(const glm::mat4& trackingFromQuad, float widthMeters, float heightMeters) {}
+	};
+
 	class backend_Vulkan_Impl
 	{
 	public:
 		backend_Vulkan_Impl() {};
 		virtual ~backend_Vulkan_Impl() {};
+
+		// Non-null when presentation is owned externally (see vk_external_presenter)
+		virtual vk_external_presenter* getExternalPresenter() { return nullptr; }
 
 		virtual PFN_vkGetInstanceProcAddr getVkGetInstanceProcAddr() = 0;
 		virtual bool getRequiredInstanceExtensions(std::vector<const char*> &output) = 0;
@@ -707,6 +751,8 @@ struct VkSurfaceGpu
 struct VkRoot final : gfx_api::context
 {
 	std::unique_ptr<gfx_api::backend_Vulkan_Impl> backend_impl;
+	// Non-null when an external presenter (OpenXR) owns the render targets; there is then no surface / swapchain
+	gfx_api::vk_external_presenter* externalPresenter = nullptr;
 	VkhInfo debugInfo;
 	gfx_api::context::swap_interval_mode swapMode = gfx_api::context::swap_interval_mode::vsync;
 	gfx_api::lighting_constants shadowConstants;
@@ -749,6 +795,19 @@ struct VkRoot final : gfx_api::context
 	uint32_t currentSwapchainIndex = 0;
 	std::vector<vk::Image> swapchainImages;
 	std::vector<vk::ImageView> swapchainImageView;
+
+	// Stereo (external presenter): while set, the swapchain color target resolves to this eye image
+	struct EyeTargetOverride
+	{
+		vk::Image image;
+		vk::ImageView view;
+		vk::Extent2D extent;
+	};
+	optional<EyeTargetOverride> _eyeTargetOverride;
+	std::unordered_map<VkImage, vk::ImageView> _eyeImageViews; // views of the presenter's eye images
+	bool _overlayTargetTransparent = false;
+	void destroyEyeImageViews();
+	vk::Extent2D swapchainTargetExtent() const;
 	bool _swapchainSupportsScreenshotReadback = false;
 
 	vk::SampleCountFlagBits msaaSamples = vk::SampleCountFlagBits::e1; // msaaSamples used for scene
@@ -873,6 +932,9 @@ private:
 	vk::PhysicalDevice pickPhysicalDevice();
 
 	bool createSurface();
+	void createExternalPresenterTargets(int& w, int& h);
+	bool hasPresentTarget() const { return static_cast<bool>(swapchain) || (externalPresenter != nullptr && !swapchainImages.empty()); }
+	bool drawableRequiresTargetRecreate(int drawableWidth, int drawableHeight) const;
 	bool canUseVulkanInstanceAPI(uint32_t minVulkanAPICoreVersion) const;
 	bool canUseVulkanDeviceAPI(uint32_t minVulkanAPICoreVersion) const;
 
@@ -976,7 +1038,8 @@ private:
 		Success,      // eSuccess - image acquired
 		Suboptimal,   // eSuboptimalKHR - index returned by Vulkan, but not consumed here
 		OutOfDate,
-		SurfaceLost
+		SurfaceLost,
+		Skipped       // external presenter has no image for this frame (e.g. XR session not visible)
 	};
 	/// acquireNextImageKHR only. Never recreates, never sets pending WSI flags (coordinator owns that).
 	/// On Success: sets currentSwapchainIndex, swapchainImageAcquired, beginFrame().
@@ -1017,6 +1080,13 @@ public:
 	virtual void shutdown() override;
 	virtual const size_t& current_FrameNum() const override;
 	virtual bool setSwapInterval(gfx_api::context::swap_interval_mode mode, const SetSwapIntervalCompletionHandler& completionHandler) override;
+
+	virtual bool stereoRenderingAvailable() const override;
+	virtual bool setStereoEyeTarget(optional<size_t> eye, gfx_api::StereoEyeView* outView = nullptr) override;
+	virtual void setOverlayTargetTransparent(bool transparent) override;
+	virtual void setStereoFramePresented(bool presented) override;
+	virtual void setStereoOverlayPlacement(const glm::mat4& trackingFromQuad, float widthMeters, float heightMeters) override;
+	virtual void setStereoHudPlacement(const glm::mat4& trackingFromQuad, float widthMeters, float heightMeters) override;
 	virtual gfx_api::context::swap_interval_mode getSwapInterval() const override;
 	virtual bool textureFormatIsSupported(gfx_api::pixel_format_target target, gfx_api::pixel_format format, gfx_api::pixel_format_usage::flags usage) override;
 	virtual bool supportsMipLodBias() const override;

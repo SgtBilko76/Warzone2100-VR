@@ -528,6 +528,11 @@ static void initialize_ConfigDir()
  */
 static void initialize_PhysicsFS(const char *argv_0)
 {
+#if defined(__ANDROID__)
+	// PhysFS reinterprets a non-NULL argv0 as a PHYSFS_AndroidInit* on Android.
+	// The Java side always passes --configdir and --datadir, so no base/pref dir lookup is needed.
+	argv_0 = nullptr;
+#endif
 	int result = PHYSFS_init(argv_0);
 
 	if (!result)
@@ -1906,6 +1911,9 @@ int realmain(int argc, char *argv[])
 	debug_init();
 #if defined(__EMSCRIPTEN__)
 	debug_register_callback(debug_callback_emscripten_log, nullptr, nullptr, nullptr);
+#endif
+#if defined(__ANDROID__)
+	debug_register_callback(debug_callback_android_log, nullptr, nullptr, nullptr);
 #endif
 	debug_register_callback(debug_callback_stderr, nullptr, nullptr, nullptr);
 #if defined(_WIN32) && defined(DEBUG_INSANE)

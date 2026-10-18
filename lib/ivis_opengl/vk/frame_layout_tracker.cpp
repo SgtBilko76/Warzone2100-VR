@@ -127,7 +127,7 @@ void FrameLayoutTracker::applyPostPassUpdates(const gfx_api::CompiledPass& pass)
 }
 
 void FrameLayoutTracker::transitionSwapchainToPresent(VkRoot& root, ::vk::CommandBuffer cmd,
-	gfx_api::abstract_texture* swapchainColor)
+	gfx_api::abstract_texture* swapchainColor, ::vk::ImageLayout presentLayout)
 {
 	if (!_swapchainTouchedThisFrame || swapchainColor == nullptr)
 	{
@@ -140,8 +140,12 @@ void FrameLayoutTracker::transitionSwapchainToPresent(VkRoot& root, ::vk::Comman
 		// Swapchain was written this frame but tracker was not reset to ColorAttachment after the write.
 		oldLayout = ::vk::ImageLayout::eColorAttachmentOptimal;
 	}
+	if (oldLayout == presentLayout)
+	{
+		return;
+	}
 	root.transitionImageLayout(cmd, swapchainColor, oldLayout,
-		::vk::ImageLayout::ePresentSrcKHR,
+		presentLayout,
 		::vk::PipelineStageFlagBits::eColorAttachmentOutput, ::vk::PipelineStageFlagBits::eBottomOfPipe,
 		::vk::AccessFlagBits::eColorAttachmentWrite, ::vk::AccessFlags());
 }

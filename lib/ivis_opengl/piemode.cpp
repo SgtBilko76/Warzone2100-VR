@@ -133,6 +133,80 @@ void pie_ScreenFrameRenderBegin()
 	}
 }
 
+static StereoSceneRenderer* g_stereoSceneRenderer = nullptr;
+
+void pie_SetStereoSceneRenderer(StereoSceneRenderer* renderer)
+{
+	g_stereoSceneRenderer = renderer;
+}
+
+// Stereo frame phases: which passes record in each
+static bool isStereoWorldOverlayPass(gfx_api::PassId passId)
+{
+	switch (passId)
+	{
+		case gfx_api::PassId::TargettingEffects:
+		case gfx_api::PassId::SceneOverlays:
+		case gfx_api::PassId::SceneDebugOverlays:
+			return true;
+		default:
+			return false;
+	}
+}
+
+static bool isStereoHudPass(gfx_api::PassId passId)
+{
+	return passId == gfx_api::PassId::InGameUI || passId == gfx_api::PassId::GameStartFade;
+}
+
+static bool isStereoEyePass(gfx_api::PassId passId)
+{
+	return passId != gfx_api::PassId::Backdrop && !isStereoWorldOverlayPass(passId) && !isStereoHudPass(passId);
+}
+
+// Runs the frame graph per eye, then for the world overlay and the HUD panel. Returns false
+// (and presents the regular frame) if the stereo targets are unavailable.
+static bool executeStereoFrame(gfx_api::CachedRenderGraph& graph)
+{
+	auto& ctx = gfx_api::context::get();
+	for (size_t eye = 0; eye < 2; ++eye)
+	{
+		gfx_api::StereoEyeView view;
+		if (!ctx.setStereoEyeTarget(eye, &view))
+		{
+			ctx.setStereoEyeTarget(nullopt);
+			g_stereoSceneRenderer->endEyes();
+			gfx_api::setRenderGraphRecordFilter(nullptr);
+			return false;
+		}
+		g_stereoSceneRenderer->beginEye(eye, view);
+		gfx_api::setRenderGraphRecordFilter(isStereoEyePass);
+		graph.execute();
+	}
+	ctx.setStereoEyeTarget(nullopt);
+	g_stereoSceneRenderer->endEyes();
+
+	ctx.setOverlayTargetTransparent(true);
+
+	g_stereoSceneRenderer->beginOverlay(false);
+	gfx_api::setRenderGraphRecordFilter(isStereoWorldOverlayPass);
+	graph.execute();
+	g_stereoSceneRenderer->endOverlay();
+
+	if (ctx.setStereoEyeTarget(gfx_api::kStereoHudTarget))
+	{
+		g_stereoSceneRenderer->beginOverlay(true);
+		gfx_api::setRenderGraphRecordFilter(isStereoHudPass);
+		graph.execute();
+		g_stereoSceneRenderer->endOverlay();
+		ctx.setStereoEyeTarget(nullopt);
+	}
+
+	ctx.setOverlayTargetTransparent(false);
+	gfx_api::setRenderGraphRecordFilter(nullptr);
+	return true;
+}
+
 void pie_ScreenFrameRenderEnd()
 {
 	if (!renderingFrame)
@@ -156,7 +230,21 @@ void pie_ScreenFrameRenderEnd()
 			const gfx_api::RenderTopologySnapshot snapshot = gfx_api::render_topology::snapshot(query);
 			gfx_api::CachedRenderGraph& graph = pie_GetCachedFrameRenderGraph();
 			graph.ensureBuilt(snapshot);
-			graph.execute();
+			const bool stereoCapable = gfx_api::context::isInitialized() && gfx_api::context::get().stereoRenderingAvailable();
+			const bool stereo = stereoCapable
+				&& g_stereoSceneRenderer != nullptr
+				&& snapshot.screenKind == gfx_api::RenderScreenKind::InGame
+				&& (snapshot.features & gfx_api::RenderFeatures::FrozenWorldOverlay) == 0
+				&& g_stereoSceneRenderer->wantsStereoFrame()
+				&& executeStereoFrame(graph);
+			if (!stereo)
+			{
+				graph.execute();
+			}
+			if (stereoCapable)
+			{
+				gfx_api::context::get().setStereoFramePresented(stereo);
+			}
 			screenDoDumpToDiskIfRequired();
 		}
 	}

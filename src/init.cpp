@@ -35,6 +35,8 @@
 #include "lib/framework/physfs_ext.h"
 #include "3rdparty/physfs_memoryio.h"
 #include "lib/framework/wzapp.h"
+#include "lib/framework/input.h"
+#include "lib/widget/widget.h"
 #include "lib/ivis_opengl/piemode.h"
 #include "lib/ivis_opengl/piestate.h"
 #include "lib/ivis_opengl/screen.h"
@@ -51,6 +53,7 @@
 
 #include "input/manager.h"
 #include "input/gamepadcursor.h"
+#include "vr_keyboard.h"
 #include "screens/gamepadlayoutscreen.h"
 #include "advvis.h"
 #include "atmos.h"
@@ -1085,6 +1088,13 @@ bool systemInitialise(unsigned int horizScalePercentage, unsigned int vertScaleP
 		return false;
 	}
 
+	if (!vrKeyboardInit())
+	{
+		return false;
+	}
+	// VR laser: the HUD panel only catches it where there is interface to point at
+	inputSetPointerTargetTest(widgIsMouseTargetAt);
+
 	if (!notificationsInitialize())
 	{
 		return false;
@@ -1188,6 +1198,7 @@ void systemShutdown()
 	levShutDown();
 	notificationsShutDown();
 	closeGamepadLayoutScreen();
+	vrKeyboardShutdown();
 	gamepadCursorShutdown();
 	widgShutDown();
 	fpathActiveBackend().shutdown();

@@ -41,6 +41,8 @@ public:
 
 	virtual bool allowImplicitLayers() const override;
 
+	virtual gfx_api::vk_external_presenter* getExternalPresenter() override;
+
 private:
 	SDL_Window* window;
 	bool m_allowImplicitLayers = false;

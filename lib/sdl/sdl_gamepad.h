@@ -32,6 +32,17 @@ void wzGamepadInit();
 // Closes any open devices and shuts down the SDL gamepad subsystem
 void wzGamepadShutdown();
 
+// When enabled, only SDL virtual gamepads are opened (e.g. the OpenXR controller bridge);
+// physical devices that deliver no input in that mode (Quest Touch controllers) are ignored
+void wzGamepadSetVirtualDevicesOnly(bool virtualOnly);
+
+// Exclusive mode (VR): the gamepad is permanently the active input source. Mouse, touch and
+// keyboard input never switch back to pointer mode, and the gamepad mode setting cannot turn it off
+void wzGamepadSetExclusive(bool exclusive);
+bool wzGamepadIsExclusive();
+// A tracked pointer drives the cursor and clicks (see gamepadPointerMode)
+void wzGamepadSetPointerMode(bool enabled);
+
 // Handles gamepad device and button events from the SDL event loop
 void wzGamepadHandleSDLEvent(const SDL_Event& event);
 

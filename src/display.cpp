@@ -1252,6 +1252,44 @@ void processGamepadCameraInput()
 	const float rightX = gamepadAxis(GPAD_AXIS_RIGHT_X);
 	const float rightY = gamepadAxis(GPAD_AXIS_RIGHT_Y);
 
+	// pan in the stick direction, faster when zoomed out
+	const auto pan = [](float stickX, float stickY) {
+		const double panZoomFactor = 1.0 + ((getViewDistance() - MINDISTANCE) / static_cast<double>(MAXDISTANCE - MINDISTANCE));
+		const double worldDeltaX = static_cast<double>(stickX) * realTimeAdjustedIncrement(GAMEPAD_CAMERA_PAN_SPEED) * panZoomFactor;
+		const double worldDeltaY = static_cast<double>(stickY) * realTimeAdjustedIncrement(GAMEPAD_CAMERA_PAN_SPEED) * panZoomFactor;
+
+		const double rot = static_cast<double>(-playerPos.r.y) * (M_PI / 32768.0);
+		playerPos.p.x += static_cast<int>(cos(rot) * worldDeltaX - sin(rot) * worldDeltaY);
+		playerPos.p.z += static_cast<int>(sin(rot) * worldDeltaX + cos(rot) * worldDeltaY);
+
+		setWarCamActive(false);
+		CheckScrollLimits(gameWorld.map);
+	};
+
+	if (gamepadPointerMode())
+	{
+		// VR, as in the 0 A.D. Quest port: the left stick pans, the right stick turns (x) and zooms (y)
+		const float leftX = gamepadAxis(GPAD_AXIS_LEFT_X);
+		const float leftY = gamepadAxis(GPAD_AXIS_LEFT_Y);
+		if (leftX != 0.f || leftY != 0.f)
+		{
+			pan(leftX, leftY);
+		}
+		if (!gamepadRightStickConsumedByUI())
+		{
+			// the stronger axis only, so zooming doesn't turn the view and vice versa
+			if (rightX != 0.f && std::abs(rightX) >= std::abs(rightY))
+			{
+				cameraRotate(static_cast<int>(-rightX * realTimeAdjustedIncrement(MAP_SPIN_RATE)), 0);
+			}
+			else if (rightY != 0.f)
+			{
+				incrementViewDistance(rightY * war_GetMapZoomRate());
+			}
+		}
+		return;
+	}
+
 	if (gamepadButtonDown(GPAD_BTN_RIGHT_SHOULDER))
 	{
 		// holding the right shoulder makes the right stick rotate and pitch the camera
@@ -1264,17 +1302,7 @@ void processGamepadCameraInput()
 	}
 	else if ((rightX != 0.f || rightY != 0.f) && !gamepadRightStickConsumedByUI())
 	{
-		// pan in the stick direction, faster when zoomed out
-		const double panZoomFactor = 1.0 + ((getViewDistance() - MINDISTANCE) / static_cast<double>(MAXDISTANCE - MINDISTANCE));
-		const double worldDeltaX = static_cast<double>(rightX) * realTimeAdjustedIncrement(GAMEPAD_CAMERA_PAN_SPEED) * panZoomFactor;
-		const double worldDeltaY = static_cast<double>(rightY) * realTimeAdjustedIncrement(GAMEPAD_CAMERA_PAN_SPEED) * panZoomFactor;
-
-		const double rot = static_cast<double>(-playerPos.r.y) * (M_PI / 32768.0);
-		playerPos.p.x += static_cast<int>(cos(rot) * worldDeltaX - sin(rot) * worldDeltaY);
-		playerPos.p.z += static_cast<int>(sin(rot) * worldDeltaX + cos(rot) * worldDeltaY);
-
-		setWarCamActive(false);
-		CheckScrollLimits(gameWorld.map);
+		pan(rightX, rightY);
 	}
 
 	// the triggers zoom the view - left out, right in

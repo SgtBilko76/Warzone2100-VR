@@ -71,6 +71,8 @@
 #include "radar.h"
 #include "display3d.h"
 #include "display3d_render_graph.h"
+#include "vr_diorama.h"
+#include "input/gamepadcursor.h"
 #include "display3d_render_internal.h"
 #include "dynamicresolution.h"
 #include "lighting.h"
@@ -1255,6 +1257,19 @@ static void drawTiles(iView *player, LightingData& lightData, LightMap& lightmap
 	WZ_PROFILE_SCOPE(drawTiles);
 	// draw terrain
 
+	// VR diorama: the regular frame is seen from straight above, and its ground rectangle is the table
+	iView dioramaCamera;
+	float cameraDistance = distance;
+	const bool diorama = vrDioramaEnabled();
+	if (diorama)
+	{
+		dioramaCamera = *player;
+		dioramaCamera.r.x = DEG(-90);
+		dioramaCamera.r.z = 0;
+		player = &dioramaCamera;
+		cameraDistance = std::min(distance, vrDioramaMaxCameraDistance());
+	}
+
 	auto currShadowMode = pie_getShadowMode();
 
 	/* ---------------------------------------------------------------- */
@@ -1272,7 +1287,7 @@ static void drawTiles(iView *player, LightingData& lightData, LightMap& lightmap
 	/* ---------------------------------------------------------------- */
 
 	const glm::mat4 baseViewMatrix =
-		glm::translate(glm::vec3(0.f, 0.f, distance)) *
+		glm::translate(glm::vec3(0.f, 0.f, cameraDistance)) *
 		glm::scale(glm::vec3(pie_GetResScalingFactor() / 100.f)) *
 		glm::rotate(UNDEG(player->r.z), glm::vec3(0.f, 0.f, 1.f)) *
 		glm::rotate(UNDEG(player->r.x), glm::vec3(1.f, 0.f, 0.f)) *
@@ -1285,21 +1300,31 @@ static void drawTiles(iView *player, LightingData& lightData, LightMap& lightmap
 	std::vector<Cascade> shadowCascades;
 	if (currShadowMode == ShadowMode::Shadow_Mapping)
 	{
-		calculateShadowCascades(player, distance, baseViewMatrix, lightInvDir, numShadowCascades, shadowCascades);
+		calculateShadowCascades(player, cameraDistance, baseViewMatrix, lightInvDir, numShadowCascades, shadowCascades);
 	}
 
 	// Incorporate all the view transforms into viewMatrix
 	const glm::mat4 viewMatrix = baseViewMatrix * glm::translate(glm::vec3(-player->p.x, 0, player->p.z));
 
-	const glm::mat4 perspectiveMatrix = pie_PerspectiveGet();
+	glm::mat4 perspectiveMatrix = pie_PerspectiveGet();
+	if (diorama)
+	{
+		vrDioramaMakeOrthographic(perspectiveMatrix, cameraDistance);
+	}
 	const glm::mat4 perspectiveViewMatrix = perspectiveMatrix * viewMatrix;
 
 	const glm::vec3 cameraPos = (glm::inverse(viewMatrix) * glm::vec4(0,0,0,1)).xyz(); // `actualCameraPosition` is not accurate enough due to int calc
 
+	if (diorama)
+	{
+		const float cursorGroundHeight = static_cast<float>(map_Height(gameWorld.map, mousePos.x, mousePos.y));
+		vrDioramaUpdateTable(perspectiveViewMatrix, static_cast<float>(player->p.y), cursorGroundHeight);
+	}
+
 	actualCameraPosition = Vector3i(0, 0, 0);
 
 	/* Set the camera position */
-	actualCameraPosition.z -= static_cast<int>(distance);
+	actualCameraPosition.z -= static_cast<int>(cameraDistance);
 
 	// Now, scale the world according to what resolution we're running in
 	actualCameraPosition.z /= std::max<int>(static_cast<int>(pie_GetResScalingFactor() / 100.f), 1);
@@ -4914,6 +4939,12 @@ void display3d_recordSceneOverlays(const gfx_api::RenderPassContext&)
 		}
 		txtCurrentTime.setText(buildInfo, font_small);
 		txtCurrentTime.render(RET_X + 134, 422 + E_H, WZCOL_TEXT_MEDIUM);
+	}
+
+	// VR: the table carries the cursor while it points at the battlefield (on the HUD panel otherwise)
+	if (vrDioramaDrawingWorldOverlay() && !isMouseOverAnyWidget())
+	{
+		gamepadCursorDraw();
 	}
 }
 
