@@ -37,6 +37,7 @@
 
     <application
         android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
         android:isGame="true"
         android:allowBackup="false"
         android:hasCode="true"
