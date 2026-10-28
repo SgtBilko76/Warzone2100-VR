@@ -1,6 +1,8 @@
 Warzone 2100 VR (Meta Quest / PICO)
 ===================================
 
+**Download, install guide, controls and pictures: [portroyale.online/warzone2100.html](https://portroyale.online/warzone2100.html)**
+
 A standalone VR port of Warzone 2100 for Meta Quest 2/3/3S/Pro and PICO 4 headsets
 (arm64 Android, OpenXR, Vulkan). The battlefield is a diorama on a table in front of
 you, the menus and the HUD sit on a floating panel, and you play with a laser pointer.
