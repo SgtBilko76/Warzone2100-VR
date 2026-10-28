@@ -16,6 +16,9 @@ The APK is the full game, including the campaign videos.
 
 Controls
 --------
+
+![Warzone 2100 VR controller mapping](../../docs/controls.webp)
+
   right controller laser   cursor (panel and table)
   right trigger            left click (select, drag a box, buttons)
   right grip               right click (orders)
